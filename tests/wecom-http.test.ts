@@ -635,3 +635,71 @@ test('403 JSON 无 errcode 抛 unavailable', async () => {
     },
   )
 })
+
+test('40014 重取 token 后再遇 45009 不再等待重试', async () => {
+  let docGetCalls = 0
+  const slept: number[] = []
+  const { client } = createClient(
+    {
+      '/cgi-bin/gettoken': { body: { errcode: 0, access_token: TOKEN, expires_in: 7200 } },
+      '/cgi-bin/wedoc/document/get': () => {
+        docGetCalls++
+        if (docGetCalls === 1) return { body: { errcode: 45009 } }
+        if (docGetCalls === 2) return { body: { errcode: 40014 } }
+        return { body: { errcode: 45009 } }
+      },
+    },
+    { sleep: async (ms: number) => { slept.push(ms) } },
+  )
+
+  await assert.rejects(
+    () => client.call('/cgi-bin/wedoc/document/get', { docid: 'doc-1' }),
+    (err: Error) => (err as KeelError).code === 'keel/wecom-unavailable',
+  )
+  assert.equal(docGetCalls, 3)
+  assert.deepEqual(slept, [1000])
+})
+
+test('403 带 errcode 60011 按 errcode 映射为 forbidden', async () => {
+  const logs: string[] = []
+  const { client } = createClient(
+    {
+      '/cgi-bin/gettoken': { body: { errcode: 0, access_token: TOKEN, expires_in: 7200 } },
+      '/cgi-bin/wedoc/document/get': { status: 403, body: { errcode: 60011, errmsg: 'no privilege' } },
+    },
+    { log: (line: string) => { logs.push(line) } },
+  )
+
+  await assert.rejects(
+    () => client.call('/cgi-bin/wedoc/document/get', { docid: 'doc-1' }),
+    (err: Error) => (err as KeelError).code === 'keel/wecom-forbidden',
+  )
+  assert.ok(logs.includes('POST /cgi-bin/wedoc/document/get 403 errcode=60011'))
+})
+
+test('非 2xx 带 errcode：gettoken 403+40013 抛 unauthorized；读接口 429+45009 等 1 秒重试一次', async () => {
+  const { client: tokenClient } = createClient({
+    '/cgi-bin/gettoken': { status: 403, body: { errcode: 40013 } },
+  })
+  await assert.rejects(
+    () => tokenClient.token(),
+    (err: Error) => (err as KeelError).code === 'keel/wecom-unauthorized',
+  )
+
+  let docGetCalls = 0
+  const slept: number[] = []
+  const { client } = createClient(
+    {
+      '/cgi-bin/gettoken': { body: { errcode: 0, access_token: TOKEN, expires_in: 7200 } },
+      '/cgi-bin/wedoc/document/get': () => {
+        docGetCalls++
+        if (docGetCalls === 1) return { status: 429, body: { errcode: 45009 } }
+        return { body: { errcode: 0, title: 'ok' } }
+      },
+    },
+    { sleep: async (ms: number) => { slept.push(ms) } },
+  )
+  const result = await client.call<{ title: string }>('/cgi-bin/wedoc/document/get', { docid: 'doc-1' })
+  assert.equal(result.title, 'ok')
+  assert.deepEqual(slept, [1000])
+})
