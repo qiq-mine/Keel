@@ -1,0 +1,46 @@
+import { HarnessError } from '@deepseek-ai/dsh-llm'
+import { KEEL_MESSAGES } from './messages.js'
+
+export const KEEL_CODES = [
+  'keel/gitlab-unavailable',
+  'keel/unauthorized',
+  'keel/forbidden',
+  'keel/not-found',
+  'keel/rate-limited',
+  'keel/not-configured',
+  'keel/outside-group',
+  'keel/labels-missing',
+  'keel/invalid-input',
+  'keel/gitlab-tls',
+  'keel/session-unavailable',
+  'keel/wecom-not-configured',
+] as const
+
+export type KeelCode = typeof KEEL_CODES[number]
+
+export {
+  CLOSED_CAP_MESSAGE,
+  CLOSED_PAGE_MESSAGE,
+  GITLAB_DOWN_MESSAGE,
+  KEEL_MESSAGES,
+  LABEL_CAP_MESSAGE,
+  MEMBER_CAP_MESSAGE,
+  OPENED_CAP_MESSAGE,
+  OVERDUE_PARTIAL_MESSAGE,
+  PROJECT_CAP_MESSAGE,
+  REDIRECT_MESSAGE,
+} from './messages.js'
+
+export class KeelError extends HarnessError {
+  override readonly code: KeelCode
+
+  constructor(code: KeelCode, message: string = KEEL_MESSAGES[code]) {
+    super(message, code)
+    this.name = 'KeelError'
+    this.code = code
+  }
+}
+
+export function keelError(code: KeelCode, message?: string): KeelError {
+  return new KeelError(code, message)
+}
