@@ -14,7 +14,12 @@ export interface FakeRouteResponse {
 export type FakeRouteHandler =
   | FakeRouteResponse
   | ((req: { method: string; path: string; queryKeys: string[]; body?: unknown }) => FakeRouteResponse | Promise<FakeRouteResponse>)
-  | unknown
+  | Record<string, unknown>
+  | unknown[]
+  | string
+  | number
+  | boolean
+  | null
 
 export function createFakeWecom(routes: Record<string, FakeRouteHandler> = {}) {
   const calls: RecordedCall[] = []
