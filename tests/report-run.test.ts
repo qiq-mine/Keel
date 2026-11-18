@@ -5,6 +5,9 @@ import {
   checkAsOf,
   previewReport,
   writeReport,
+  ReportJobs,
+  type ReportPreview,
+  type ReportResult,
   type RunDeps,
   type RunProject
 } from '../src/report/run.js'
@@ -27,7 +30,6 @@ interface EnvOptions {
   initialVersion?: number
   onBatchUpdate?: (req: { body?: unknown }) => { errcode: number; errmsg?: string } | void
   tokenHandler?: FakeRouteHandler
-  secret?: string
 }
 
 function setupEnv(options: EnvOptions = {}) {
@@ -121,7 +123,7 @@ function setupEnv(options: EnvOptions = {}) {
 
   const http = new WecomHttp({
     corpId: 'fake_corp',
-    secret: options.secret ?? 'test-wecom-secret',
+    secret: 'test-wecom-secret',
     fetch: fake.fetch,
     sleep: async () => {}
   })
@@ -609,6 +611,7 @@ test('writeReport: gettoken fails (errcode 40001) -> every project failed, only 
 })
 
 test('writeReport: deps.wecom returns null -> every project failed, no fetch, no gitlab call', async () => {
+  const env = setupEnv()
   const now = Date.parse('2026-11-20T09:00:00.000+08:00')
   let projectsCalled = 0
   let reportIssuesCalled = 0
@@ -645,6 +648,7 @@ test('writeReport: deps.wecom returns null -> every project failed, no fetch, no
   assert.equal(labelEventsCalled, 0)
   assert.deepEqual(result.projects, [])
   assert.equal(result.message, KEEL_MESSAGES['keel/wecom-not-configured'])
+  assert.equal(env.calls.length, 0)
   assertNoSecrets(result)
 })
 
@@ -752,12 +756,6 @@ test('writeReport: fresh client per run -> deps.wecom called twice, new secret u
   assert.equal(json2.includes('secret-beta'), false)
   assert.equal(json2.includes('test-access-token'), false)
 })
-
-import {
-  ReportJobs,
-  type ReportResult,
-  type ReportPreview
-} from '../src/report/run.js'
 
 test('ReportJobs: two jobs started back to back run serially without overlap', async () => {
   const jobs = new ReportJobs()
@@ -953,7 +951,7 @@ test('ReportJobs: status returns deep copies of preview and result', async () =>
     projectId: 1,
     projectPath: 'p1',
     text: 'original preview text',
-    counts: { created: 1, closed: 0, overdue: 0, highRisk: 0, secretOmitted: 0 } as unknown as ReportPreview['projects'][number]['counts'],
+    counts: { created: 1, closed: 0, overdue: 0, highRiskEvents: 0, doing: null, blocked: null, highRiskNow: 0 },
     truncated: false
   }
   const originalResultProject: ReportResult['projects'][number] = {
@@ -1044,6 +1042,59 @@ test('ReportJobs: failed job does not overwrite lastReport from earlier success'
 
   assert.equal(jobs.status(id2).state, 'failed')
   assert.deepEqual(jobs.lastReport(), reportBefore)
+})
+
+test('ReportJobs: early-stop write does not change lastReport, first-ever leaves it null', async () => {
+  const jobs = new ReportJobs()
+  const finishedAt = '2026-11-19T10:00:00+08:00'
+
+  jobs.start(async () => ({
+    result: {
+      kind: 'manual',
+      weekTitle: '2026-W47',
+      finishedAt,
+      message: null,
+      projects: [
+        { projectId: 1, projectPath: 'p1', weekly: 'written', monthly: 'not-due', message: null, docUrl: null, counts: null }
+      ]
+    }
+  }))
+  await jobs.idle()
+
+  const normalReport = {
+    at: finishedAt,
+    written: 1,
+    skipped: 0,
+    failed: 0
+  }
+  assert.deepEqual(jobs.lastReport(), normalReport)
+
+  jobs.start(async () => ({
+    result: {
+      kind: 'manual',
+      weekTitle: '2026-W47',
+      finishedAt: '2026-11-19T11:00:00+08:00',
+      message: '尚未配置企业微信',
+      projects: []
+    }
+  }))
+  await jobs.idle()
+
+  assert.deepEqual(jobs.lastReport(), normalReport)
+
+  const freshJobs = new ReportJobs()
+  freshJobs.start(async () => ({
+    result: {
+      kind: 'manual',
+      weekTitle: '2026-W47',
+      finishedAt: '2026-11-19T09:00:00+08:00',
+      message: '尚未配置企业微信',
+      projects: []
+    }
+  }))
+  await freshJobs.idle()
+
+  assert.equal(freshJobs.lastReport(), null)
 })
 
 

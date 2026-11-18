@@ -5,6 +5,7 @@ import type { Config } from './config.js'
 import { KeelError } from './errors.js'
 import type { KeelConnection, KeelIssue, KeelLabel, KeelListPage, KeelListQuery, KeelMember, KeelProject, KeelRisk } from './model.js'
 import * as ops from './operations.js'
+import { ReportJobs, ReportStatus } from './report/run.js'
 
 declare module '@deepseek-ai/dsh-typert-protocol/types' {
   interface RemoteErrorDetailsMap {
@@ -38,6 +39,8 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export class KeelService extends TypertRemoteService {
+  private readonly jobs = new ReportJobs()
+
   constructor(ctx: Context, private readonly config: Config) {
     super(ctx, 'keel')
   }
@@ -137,6 +140,16 @@ export class KeelService extends TypertRemoteService {
     return this.run(signal, ctx => ops.analyzeIssue(ctx, { projectId, iid, sessionId, agentPreset }, signal))
   }
 
+  @Remote
+  reportStart(mode: string, asOf: string, signal: AbortSignal): Promise<{ runId: string }> {
+    return this.run(signal, ctx => ops.reportStart(ctx, mode, asOf))
+  }
+
+  @Remote
+  reportStatus(runId: string, signal: AbortSignal): Promise<ReportStatus> {
+    return this.run(signal, async ctx => ops.reportStatus(ctx, runId))
+  }
+
   private async run<T>(signal: AbortSignal, action: (ctx: ops.OperationContext) => Promise<T>): Promise<T> {
     signal.throwIfAborted()
     try {
@@ -168,6 +181,7 @@ export class KeelService extends TypertRemoteService {
       },
       set: (ref, value) => credentials.set(credentialRef(ref), value),
       unset: ref => credentials.unset(credentialRef(ref)),
+      jobs: this.jobs,
     }
   }
 }

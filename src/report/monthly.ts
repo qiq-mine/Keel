@@ -22,7 +22,7 @@ interface RawSection {
 }
 
 export function parseWeeks(docText: string, month: string): WeekCounts[] {
-  const lines = docText.split('\n').map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l))
+  const lines = docText.split('\n')
   const rawSections: RawSection[] = []
   let current: RawSection | null = null
 

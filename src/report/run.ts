@@ -396,23 +396,26 @@ export class ReportJobs {
         job.result = output.result ?? null
         job.message = output.result?.message ?? null
         if (output.result) {
-          let written = 0
-          let skipped = 0
-          let failed = 0
-          for (const p of output.result.projects ?? []) {
-            if (p.weekly === 'written') {
-              written++
-            } else if (p.weekly === 'skipped') {
-              skipped++
-            } else if (p.weekly === 'failed') {
-              failed++
+          const earlyStop = output.result.message !== null && (output.result.projects?.length ?? 0) === 0
+          if (!earlyStop) {
+            let written = 0
+            let skipped = 0
+            let failed = 0
+            for (const p of output.result.projects ?? []) {
+              if (p.weekly === 'written') {
+                written++
+              } else if (p.weekly === 'skipped') {
+                skipped++
+              } else if (p.weekly === 'failed') {
+                failed++
+              }
             }
-          }
-          this.#lastReport = {
-            at: output.result.finishedAt,
-            written,
-            skipped,
-            failed
+            this.#lastReport = {
+              at: output.result.finishedAt,
+              written,
+              skipped,
+              failed
+            }
           }
         }
       } catch (err) {
