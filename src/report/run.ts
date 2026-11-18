@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { WecomHttp } from '../wecom/http.js'
 import {
   type DocTarget,
@@ -309,4 +310,150 @@ export async function writeReport(
     projects: results
   }
 }
+
+export type ReportJobState = 'queued' | 'running' | 'done' | 'failed'
+
+export interface ReportStatus {
+  state: ReportJobState
+  progress: { done: number; total: number }
+  preview: ReportPreview | null
+  result: ReportResult | null
+  message: string | null
+}
+
+export interface ReportJobOutput {
+  preview?: ReportPreview
+  result?: ReportResult
+}
+
+export type ReportTask = (onProgress: (done: number, total: number) => void) => Promise<ReportJobOutput>
+
+export interface LastReport {
+  at: string
+  written: number
+  skipped: number
+  failed: number
+}
+
+interface StoredJob {
+  id: string
+  state: ReportJobState
+  progress: { done: number; total: number }
+  preview: ReportPreview | null
+  result: ReportResult | null
+  message: string | null
+}
+
+export class ReportJobs {
+  readonly #newId: () => string
+  readonly #keep: number
+  readonly #jobs = new Map<string, StoredJob>()
+  readonly #jobList: StoredJob[] = []
+  #tail: Promise<void> = Promise.resolve()
+  #lastReport: LastReport | null = null
+
+  constructor(options?: { newId?: () => string; keep?: number }) {
+    this.#newId = options?.newId ?? randomUUID
+    this.#keep = options?.keep ?? 10
+  }
+
+  #prune(): void {
+    while (this.#jobList.length > this.#keep) {
+      const idx = this.#jobList.findIndex(j => j.state === 'done' || j.state === 'failed')
+      if (idx === -1) {
+        break
+      }
+      const [removed] = this.#jobList.splice(idx, 1)
+      this.#jobs.delete(removed.id)
+    }
+  }
+
+  start(task: ReportTask): string {
+    const runId = this.#newId()
+    const job: StoredJob = {
+      id: runId,
+      state: 'queued',
+      progress: { done: 0, total: 0 },
+      preview: null,
+      result: null,
+      message: null
+    }
+    this.#jobs.set(runId, job)
+    this.#jobList.push(job)
+    this.#prune()
+
+    const run = async () => {
+      job.state = 'running'
+      try {
+        const onProgress = (done: number, total: number) => {
+          if (done >= job.progress.done) {
+            job.progress = { done, total }
+          }
+        }
+        const output = (await task(onProgress)) ?? {}
+        job.state = 'done'
+        job.preview = output.preview ?? null
+        job.result = output.result ?? null
+        job.message = output.result?.message ?? null
+        if (output.result) {
+          let written = 0
+          let skipped = 0
+          let failed = 0
+          for (const p of output.result.projects ?? []) {
+            if (p.weekly === 'written') {
+              written++
+            } else if (p.weekly === 'skipped') {
+              skipped++
+            } else if (p.weekly === 'failed') {
+              failed++
+            }
+          }
+          this.#lastReport = {
+            at: output.result.finishedAt,
+            written,
+            skipped,
+            failed
+          }
+        }
+      } catch (err) {
+        job.state = 'failed'
+        job.message = err instanceof KeelError ? err.message : '周报生成失败'
+      } finally {
+        this.#prune()
+      }
+    }
+
+    this.#tail = this.#tail.then(run, run)
+    return runId
+  }
+
+  status(runId: string): ReportStatus {
+    const job = this.#jobs.get(runId)
+    if (!job) {
+      throw keelError('keel/not-found')
+    }
+    return {
+      state: job.state,
+      progress: { done: job.progress.done, total: job.progress.total },
+      preview: job.preview === null ? null : structuredClone(job.preview),
+      result: job.result === null ? null : structuredClone(job.result),
+      message: job.message
+    }
+  }
+
+  lastReport(): LastReport | null {
+    return this.#lastReport ? { ...this.#lastReport } : null
+  }
+
+  async idle(): Promise<void> {
+    while (true) {
+      const p = this.#tail
+      await p
+      if (this.#tail === p) {
+        break
+      }
+    }
+  }
+}
+
 

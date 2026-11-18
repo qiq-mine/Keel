@@ -753,3 +753,297 @@ test('writeReport: fresh client per run -> deps.wecom called twice, new secret u
   assert.equal(json2.includes('test-access-token'), false)
 })
 
+import {
+  ReportJobs,
+  type ReportResult,
+  type ReportPreview
+} from '../src/report/run.js'
+
+test('ReportJobs: two jobs started back to back run serially without overlap', async () => {
+  const jobs = new ReportJobs()
+  let running = 0
+  let maxConcurrent = 0
+  const order: string[] = []
+
+  let signalJob1Started!: () => void
+  const job1Started = new Promise<void>(resolve => {
+    signalJob1Started = resolve
+  })
+
+  let resolveJob1!: () => void
+  const gate1 = new Promise<void>(resolve => {
+    resolveJob1 = resolve
+  })
+
+  const id1 = jobs.start(async () => {
+    running++
+    maxConcurrent = Math.max(maxConcurrent, running)
+    order.push('job1-start')
+    signalJob1Started()
+    await gate1
+    order.push('job1-end')
+    running--
+    return {}
+  })
+
+  const id2 = jobs.start(async () => {
+    running++
+    maxConcurrent = Math.max(maxConcurrent, running)
+    order.push('job2-start')
+    order.push('job2-end')
+    running--
+    return {}
+  })
+
+  await job1Started
+  assert.equal(jobs.status(id1).state, 'running')
+  assert.equal(jobs.status(id2).state, 'queued')
+
+  resolveJob1()
+  await jobs.idle()
+
+  assert.equal(jobs.status(id1).state, 'done')
+  assert.equal(jobs.status(id2).state, 'done')
+  assert.equal(maxConcurrent, 1)
+  assert.deepEqual(order, ['job1-start', 'job1-end', 'job2-start', 'job2-end'])
+})
+
+test('ReportJobs: progress never decreases', async () => {
+  const jobs = new ReportJobs()
+  const readProgresses: number[] = []
+
+  const id = jobs.start(async onProgress => {
+    onProgress(1, 3)
+    readProgresses.push(jobs.status(id).progress.done)
+    onProgress(0, 3)
+    readProgresses.push(jobs.status(id).progress.done)
+    onProgress(2, 3)
+    readProgresses.push(jobs.status(id).progress.done)
+    return {}
+  })
+
+  await jobs.idle()
+  const finalStatus = jobs.status(id)
+  assert.deepEqual(finalStatus.progress, { done: 2, total: 3 })
+  assert.deepEqual(readProgresses, [1, 1, 2])
+  for (let i = 1; i < readProgresses.length; i++) {
+    assert.ok(readProgresses[i] >= readProgresses[i - 1])
+  }
+})
+
+test('ReportJobs: task failures handle errors properly and next queued job still runs', async () => {
+  const jobs = new ReportJobs()
+
+  const id1 = jobs.start(async () => {
+    throw keelError('keel/report-stale')
+  })
+
+  const id2 = jobs.start(async () => {
+    throw new Error('boom secret=xyz')
+  })
+
+  const id3 = jobs.start(async () => {
+    return {}
+  })
+
+  await jobs.idle()
+
+  const s1 = jobs.status(id1)
+  assert.equal(s1.state, 'failed')
+  assert.equal(s1.message, '预览已过期，请重新预览')
+
+  const s2 = jobs.status(id2)
+  assert.equal(s2.state, 'failed')
+  assert.equal(s2.message, '周报生成失败')
+  assert.equal(s2.message.includes('xyz'), false)
+
+  const s3 = jobs.status(id3)
+  assert.equal(s3.state, 'done')
+})
+
+test('ReportJobs: lastReport tracks result projects and ignores preview-only jobs', async () => {
+  const jobs = new ReportJobs()
+  assert.equal(jobs.lastReport(), null)
+
+  const finishedAt = '2026-11-19T10:00:00+08:00'
+  const fakeResult: ReportResult = {
+    kind: 'manual',
+    weekTitle: '2026-W47',
+    finishedAt,
+    message: null,
+    projects: [
+      { projectId: 1, projectPath: 'p1', weekly: 'written', monthly: 'not-due', message: null, docUrl: null, counts: null },
+      { projectId: 2, projectPath: 'p2', weekly: 'skipped', monthly: 'not-due', message: null, docUrl: null, counts: null },
+      { projectId: 3, projectPath: 'p3', weekly: 'failed', monthly: 'not-due', message: null, docUrl: null, counts: null },
+      { projectId: 4, projectPath: 'p4', weekly: 'written', monthly: 'not-due', message: null, docUrl: null, counts: null }
+    ]
+  }
+
+  jobs.start(async () => ({ result: fakeResult }))
+  await jobs.idle()
+
+  assert.deepEqual(jobs.lastReport(), {
+    at: finishedAt,
+    written: 2,
+    skipped: 1,
+    failed: 1
+  })
+
+  const fakePreview: ReportPreview = {
+    asOf: '2026-11-19T10:00:00+08:00',
+    weekTitle: '2026-W47',
+    windowStart: '2026-11-12T00:00:00+08:00',
+    windowEnd: '2026-11-19T00:00:00+08:00',
+    generatedAt: '2026-11-19T10:05:00+08:00',
+    monthlyDue: false,
+    monthlyTitle: null,
+    projects: [],
+    failed: []
+  }
+
+  jobs.start(async () => ({ preview: fakePreview }))
+  await jobs.idle()
+
+  assert.deepEqual(jobs.lastReport(), {
+    at: finishedAt,
+    written: 2,
+    skipped: 1,
+    failed: 1
+  })
+})
+
+test('ReportJobs: keep 10 drops oldest finished jobs when new jobs are added', async () => {
+  let count = 0
+  const jobs = new ReportJobs({
+    newId: () => {
+      count++
+      return `r${count}`
+    },
+    keep: 10
+  })
+
+  for (let i = 1; i <= 12; i++) {
+    jobs.start(async () => ({}))
+    await jobs.idle()
+  }
+
+  assert.throws(
+    () => jobs.status('r1'),
+    (err: unknown) => err instanceof KeelError && err.code === 'keel/not-found'
+  )
+  assert.throws(
+    () => jobs.status('r2'),
+    (err: unknown) => err instanceof KeelError && err.code === 'keel/not-found'
+  )
+  const s12 = jobs.status('r12')
+  assert.equal(s12.state, 'done')
+})
+
+test('ReportJobs: status of unknown runId throws keel/not-found', () => {
+  const jobs = new ReportJobs()
+  assert.throws(
+    () => jobs.status('nope'),
+    (err: unknown) => err instanceof KeelError && err.code === 'keel/not-found'
+  )
+})
+
+test('ReportJobs: status returns deep copies of preview and result', async () => {
+  const jobs = new ReportJobs()
+  const originalPreviewProject = {
+    projectId: 1,
+    projectPath: 'p1',
+    text: 'original preview text',
+    counts: { created: 1, closed: 0, overdue: 0, highRisk: 0, secretOmitted: 0 } as unknown as ReportPreview['projects'][number]['counts'],
+    truncated: false
+  }
+  const originalResultProject: ReportResult['projects'][number] = {
+    projectId: 1,
+    projectPath: 'p1',
+    weekly: 'written',
+    monthly: 'not-due',
+    message: 'original message',
+    docUrl: null,
+    counts: null
+  }
+  const id = jobs.start(async onProgress => {
+    onProgress(1, 1)
+    return {
+      preview: {
+        asOf: '2026-11-19T10:00:00+08:00',
+        weekTitle: '2026-W47',
+        windowStart: '2026-11-12T00:00:00+08:00',
+        windowEnd: '2026-11-19T00:00:00+08:00',
+        generatedAt: '2026-11-19T10:05:00+08:00',
+        monthlyDue: false,
+        monthlyTitle: null,
+        projects: [originalPreviewProject],
+        failed: []
+      },
+      result: {
+        kind: 'manual',
+        weekTitle: '2026-W47',
+        finishedAt: '2026-11-19T10:00:00+08:00',
+        message: null,
+        projects: [originalResultProject]
+      }
+    }
+  })
+  await jobs.idle()
+
+  const s = jobs.status(id)
+  s.progress.done = 99
+  s.result!.projects.push({
+    projectId: 2,
+    projectPath: 'p2',
+    weekly: 'failed',
+    monthly: 'not-due',
+    message: 'mutated',
+    docUrl: null,
+    counts: null
+  })
+  s.result!.projects[0].message = 'x'
+  s.preview!.projects[0].text = 'x'
+
+  const sAfter = jobs.status(id)
+  assert.equal(sAfter.progress.done, 1)
+  assert.equal(sAfter.progress.total, 1)
+  assert.equal(sAfter.result!.projects.length, 1)
+  assert.equal(sAfter.result!.projects[0].message, 'original message')
+  assert.equal(sAfter.preview!.projects[0].text, 'original preview text')
+})
+
+test('ReportJobs: failed job does not overwrite lastReport from earlier success', async () => {
+  const jobs = new ReportJobs()
+  const finishedAt = '2026-11-19T10:00:00+08:00'
+  const id1 = jobs.start(async () => ({
+    result: {
+      kind: 'manual',
+      weekTitle: '2026-W47',
+      finishedAt,
+      message: null,
+      projects: [
+        { projectId: 1, projectPath: 'p1', weekly: 'written', monthly: 'not-due', message: null, docUrl: null, counts: null }
+      ]
+    }
+  }))
+  await jobs.idle()
+  assert.equal(jobs.status(id1).state, 'done')
+
+  const reportBefore = jobs.lastReport()
+  assert.deepEqual(reportBefore, {
+    at: finishedAt,
+    written: 1,
+    skipped: 0,
+    failed: 0
+  })
+
+  const id2 = jobs.start(async () => {
+    throw new Error('job failed')
+  })
+  await jobs.idle()
+
+  assert.equal(jobs.status(id2).state, 'failed')
+  assert.deepEqual(jobs.lastReport(), reportBefore)
+})
+
+
