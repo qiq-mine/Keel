@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { keelError } from '../errors.js'
+import { keelError, KeelError } from '../errors.js'
+import type { WecomHttp } from './http.js'
 
 export function docName(pathWithNamespace: string): string {
   const replaced = pathWithNamespace.replaceAll('/', ' - ')
@@ -93,4 +94,136 @@ export function sectionRange(text: string, title: string): { begin: number; end:
 
 export function docHeader(pathWithNamespace: string): string {
   return 'Keel 周报\n' + pathWithNamespace + '\n'
+}
+
+export interface DocTarget {
+  spaceid: string
+  fatherid: string
+}
+
+interface FileListItem {
+  fileid: string
+  file_name: string
+  file_type: number
+  file_status: number
+  url?: string
+}
+
+interface FileListResponse {
+  has_more?: boolean
+  next_start?: number
+  file_list?: {
+    item?: FileListItem[]
+  }
+}
+
+interface CreateDocResponse {
+  docid: string
+  url: string
+}
+
+export async function listDocsByName(
+  http: WecomHttp,
+  target: DocTarget,
+  name: string
+): Promise<{ fileid: string; url: string }[]> {
+  let start = 0
+  const results: { fileid: string; url: string }[] = []
+  let page = 1
+
+  while (page <= 20) {
+    const res = await http.call<FileListResponse>('/cgi-bin/wedrive/file_list', {
+      spaceid: target.spaceid,
+      fatherid: target.fatherid,
+      sort_type: 1,
+      start,
+      limit: 1000
+    })
+
+    const items = res.file_list?.item ?? []
+    for (const item of items) {
+      if (item.file_status === 1 && item.file_type === 3 && item.file_name === name) {
+        results.push({ fileid: item.fileid, url: item.url ?? '' })
+      }
+    }
+
+    if (!res.has_more) {
+      return results
+    }
+
+    if (page === 20) {
+      throw keelError('keel/wecom-ambiguous-doc')
+    }
+
+    start = typeof res.next_start === 'number' ? res.next_start : start + 1000
+    page++
+  }
+
+  return results
+}
+
+export async function createDoc(
+  http: WecomHttp,
+  target: DocTarget,
+  name: string
+): Promise<{ docid: string; url: string }> {
+  try {
+    const res = await http.call<CreateDocResponse>('/cgi-bin/wedoc/create_doc', {
+      spaceid: target.spaceid,
+      fatherid: target.fatherid,
+      doc_type: 3,
+      doc_name: name
+    })
+    return { docid: res.docid, url: res.url }
+  } catch (err) {
+    if (err instanceof KeelError && err.code === 'keel/wecom-unavailable') {
+      const matches = await listDocsByName(http, target, name)
+      if (matches.length === 1) {
+        return { docid: matches[0].fileid, url: matches[0].url }
+      }
+      if (matches.length === 0) {
+        throw err
+      }
+      throw keelError('keel/wecom-ambiguous-doc')
+    }
+    throw err
+  }
+}
+
+export async function resolveDocid(
+  http: WecomHttp,
+  file: { fileid: string; url: string }
+): Promise<string> {
+  try {
+    await http.call('/cgi-bin/wedoc/document/get', { docid: file.fileid })
+    return file.fileid
+  } catch (err) {
+    if (
+      !(
+        err instanceof KeelError &&
+        (err.code === 'keel/wecom-rejected' || err.code === 'keel/wecom-forbidden')
+      )
+    ) {
+      throw err
+    }
+  }
+
+  const urlDocid = docidFromUrl(file.url)
+  if (urlDocid !== null) {
+    try {
+      await http.call('/cgi-bin/wedoc/document/get', { docid: urlDocid })
+      return urlDocid
+    } catch (err) {
+      if (
+        !(
+          err instanceof KeelError &&
+          (err.code === 'keel/wecom-rejected' || err.code === 'keel/wecom-forbidden')
+        )
+      ) {
+        throw err
+      }
+    }
+  }
+
+  throw keelError('keel/wecom-docid-unreadable')
 }
