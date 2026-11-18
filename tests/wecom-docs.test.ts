@@ -549,3 +549,377 @@ describe('resolveDocid', () => {
     }
   })
 })
+
+import { readDoc, replaceSection } from '../src/wecom/docs.js'
+
+interface FakeDocOptions {
+  version?: number
+  text?: string
+  offset?: number
+  children?: Array<{ begin: number; end: number; text: string }>
+  batchUpdateHandler?: (callCount: number) => { errcode: number; errmsg?: string } | void
+}
+
+function setupDocFake(options: FakeDocOptions = {}) {
+  let version = options.version ?? 1
+  let text = options.text ?? ''
+  const offset = options.offset ?? 0
+  let customChildren = options.children
+  let batchUpdateCallCount = 0
+
+  const { http, calls } = setupWecom({
+    '/cgi-bin/wedoc/document/get': () => {
+      const children = customChildren ?? [
+        {
+          begin: offset,
+          end: offset + text.length,
+          text
+        }
+      ]
+      return {
+        body: {
+          errcode: 0,
+          version,
+          document: {
+            body: {
+              children
+            }
+          }
+        }
+      }
+    },
+    '/cgi-bin/wedoc/document/batch_update': req => {
+      batchUpdateCallCount++
+      if (options.batchUpdateHandler) {
+        const failure = options.batchUpdateHandler(batchUpdateCallCount)
+        if (failure) {
+          return { body: failure }
+        }
+      }
+
+      const body = req.body as {
+        docid: string
+        version: number
+        requests: Array<{
+          delete_content?: { range: { start_index: number; length: number } }
+          insert_text?: { text: string; location: { index: number } }
+        }>
+      }
+
+      let current = text
+      for (const r of body.requests ?? []) {
+        if (r.delete_content) {
+          const start = r.delete_content.range.start_index - offset
+          const len = r.delete_content.range.length
+          current = current.slice(0, start) + current.slice(start + len)
+        }
+        if (r.insert_text) {
+          const idx = r.insert_text.location.index - offset
+          current = current.slice(0, idx) + r.insert_text.text + current.slice(idx)
+        }
+      }
+      text = current
+      version++
+      customChildren = undefined
+
+      return {
+        body: {
+          errcode: 0
+        }
+      }
+    }
+  })
+
+  return {
+    http,
+    calls,
+    getText: () => text,
+    getVersion: () => version
+  }
+}
+
+describe('readDoc', () => {
+  it('walks document depth-first in property/array order and collects text nodes', async () => {
+    const { http } = setupWecom({
+      '/cgi-bin/wedoc/document/get': {
+        errcode: 0,
+        version: 5,
+        document: {
+          header: {
+            title: { begin: 0, end: 5, text: 'Hello' }
+          },
+          body: {
+            elements: [
+              { begin: 5, end: 6, text: ' ' },
+              {
+                nested: {
+                  begin: 6,
+                  end: 11,
+                  text: 'World',
+                  extra: { begin: 99, end: 100, text: 'ignored because inside collected node' }
+                }
+              }
+            ]
+          }
+        }
+      }
+    })
+    const doc = await readDoc(http, 'd1')
+    assert.deepEqual(doc, { version: 5, text: 'Hello World', offset: 0 })
+  })
+
+  it('rejects when joinText fails due to mismatched lengths', async () => {
+    const { http } = setupWecom({
+      '/cgi-bin/wedoc/document/get': {
+        errcode: 0,
+        version: 1,
+        document: {
+          children: [{ begin: 0, end: 20, text: 'short' }]
+        }
+      }
+    })
+    await assert.rejects(
+      async () => {
+        await readDoc(http, 'd1')
+      },
+      (err: unknown) => err instanceof KeelError && err.code === 'keel/wecom-doc-index'
+    )
+  })
+})
+
+describe('replaceSection', () => {
+  const initialDoc = 'Keel 周报\nacme/app\n周报 2026-11-13\na\n周报 2026-11-20\nold\n月报 2026-11\nm\n'
+
+  it('replaces existing section: written, correct requests and version, idempotent on rerun', async () => {
+    const { http, calls, getText } = setupDocFake({ text: initialDoc })
+
+    const res1 = await replaceSection(
+      http,
+      'doc1',
+      '周报 2026-11-20',
+      '周报 2026-11-20\nnew\n',
+      'if-different'
+    )
+    assert.equal(res1, 'written')
+    assert.equal(
+      getText(),
+      'Keel 周报\nacme/app\n周报 2026-11-13\na\n周报 2026-11-20\nnew\n月报 2026-11\nm\n'
+    )
+
+    const batchCalls = calls.filter(c => c.path === '/cgi-bin/wedoc/document/batch_update')
+    assert.equal(batchCalls.length, 1)
+    const body = batchCalls[0].body as Record<string, unknown>
+    assert.equal(body.docid, 'doc1')
+    assert.equal(body.version, 1)
+
+    const requests = body.requests as Array<{
+      delete_content?: { range: { start_index: number; length: number } }
+      insert_text?: { text: string; location: { index: number } }
+    }>
+    assert.equal(requests.length, 2)
+    assert.ok(requests[0].delete_content)
+    assert.ok(requests[1].insert_text)
+    assert.equal(
+      requests[0].delete_content.range.start_index,
+      requests[1].insert_text.location.index
+    )
+
+    const res2 = await replaceSection(
+      http,
+      'doc1',
+      '周报 2026-11-20',
+      '周报 2026-11-20\nnew\n',
+      'if-different'
+    )
+    assert.equal(res2, 'skipped')
+    const batchCallsAfterRerun = calls.filter(c => c.path === '/cgi-bin/wedoc/document/batch_update')
+    assert.equal(batchCallsAfterRerun.length, 1)
+  })
+
+  it('skips when policy is if-missing and title exists', async () => {
+    const { http, calls, getText } = setupDocFake({ text: initialDoc })
+
+    const res = await replaceSection(
+      http,
+      'doc1',
+      '周报 2026-11-20',
+      '周报 2026-11-20\nnew\n',
+      'if-missing'
+    )
+    assert.equal(res, 'skipped')
+    assert.equal(getText(), initialDoc)
+    assert.equal(calls.filter(c => c.path === '/cgi-bin/wedoc/document/batch_update').length, 0)
+  })
+
+  it('appends at end when title is missing, only insert_text and no delete_content', async () => {
+    const { http, calls, getText } = setupDocFake({ text: 'Keel 周报\nacme/app\n' })
+
+    const res = await replaceSection(
+      http,
+      'doc1',
+      '周报 2026-11-27',
+      '周报 2026-11-27\nadded\n',
+      'if-different'
+    )
+    assert.equal(res, 'written')
+    assert.equal(getText(), 'Keel 周报\nacme/app\n周报 2026-11-27\nadded\n')
+
+    const batchCalls = calls.filter(c => c.path === '/cgi-bin/wedoc/document/batch_update')
+    assert.equal(batchCalls.length, 1)
+    const body = batchCalls[0].body as Record<string, unknown>
+    const requests = body.requests as Array<Record<string, unknown>>
+    assert.equal(requests.length, 1)
+    assert.ok('insert_text' in requests[0])
+    assert.equal('delete_content' in requests[0], false)
+  })
+
+  it('prefixes newline when appending to non-empty doc that does not end with newline', async () => {
+    const { http, getText } = setupDocFake({ text: 'Keel 周报\nacme/app' })
+
+    const res = await replaceSection(
+      http,
+      'doc1',
+      '周报 2026-11-27',
+      '周报 2026-11-27\nadded\n',
+      'if-missing'
+    )
+    assert.equal(res, 'written')
+    assert.equal(getText(), 'Keel 周报\nacme/app\n周报 2026-11-27\nadded\n')
+  })
+
+  it('runs replacement to end of doc for 月报 2026-11', async () => {
+    const docWithMonthly = 'Keel 周报\nacme/app\n周报 2026-11-13\na\n月报 2026-11\nold\n'
+    const { http, getText } = setupDocFake({ text: docWithMonthly })
+
+    const res = await replaceSection(
+      http,
+      'doc1',
+      '月报 2026-11',
+      '月报 2026-11\nnew content\n',
+      'if-different'
+    )
+    assert.equal(res, 'written')
+    assert.equal(
+      getText(),
+      'Keel 周报\nacme/app\n周报 2026-11-13\na\n月报 2026-11\nnew content\n'
+    )
+  })
+
+  it('rejects keel/wecom-doc-index when document/get has invalid node and records no batch_update', async () => {
+    const { http, calls } = setupWecom({
+      '/cgi-bin/wedoc/document/get': {
+        errcode: 0,
+        version: 1,
+        document: {
+          body: {
+            children: [{ begin: 0, end: 10, text: 'mismatch' }]
+          }
+        }
+      }
+    })
+
+    await assert.rejects(
+      async () => {
+        await replaceSection(
+          http,
+          'doc1',
+          '周报 2026-11-20',
+          '周报 2026-11-20\nnew\n',
+          'if-different'
+        )
+      },
+      (err: unknown) => err instanceof KeelError && err.code === 'keel/wecom-doc-index'
+    )
+
+    assert.equal(calls.filter(c => c.path === '/cgi-bin/wedoc/document/batch_update').length, 0)
+  })
+
+  it('retries when batch_update fails once then succeeds, and fails twice rethrows with no delete_content alone', async () => {
+    {
+      const { http, calls, getText } = setupDocFake({
+        text: initialDoc,
+        batchUpdateHandler: count => {
+          if (count === 1) {
+            return { errcode: 640014, errmsg: 'version conflict' }
+          }
+        }
+      })
+
+      const res = await replaceSection(
+        http,
+        'doc1',
+        '周报 2026-11-20',
+        '周报 2026-11-20\nnew\n',
+        'if-different'
+      )
+      assert.equal(res, 'written')
+      assert.equal(
+        getText(),
+        'Keel 周报\nacme/app\n周报 2026-11-13\na\n周报 2026-11-20\nnew\n月报 2026-11\nm\n'
+      )
+      assert.equal(calls.filter(c => c.path === '/cgi-bin/wedoc/document/get').length, 2)
+      assert.equal(calls.filter(c => c.path === '/cgi-bin/wedoc/document/batch_update').length, 2)
+    }
+
+    {
+      const { http, calls } = setupDocFake({
+        text: initialDoc,
+        batchUpdateHandler: () => ({ errcode: 640014, errmsg: 'version conflict' })
+      })
+
+      await assert.rejects(async () => {
+        await replaceSection(
+          http,
+          'doc1',
+          '周报 2026-11-20',
+          '周报 2026-11-20\nnew\n',
+          'if-different'
+        )
+      })
+
+      assert.equal(calls.filter(c => c.path === '/cgi-bin/wedoc/document/get').length, 2)
+      const batchCalls = calls.filter(c => c.path === '/cgi-bin/wedoc/document/batch_update')
+      assert.equal(batchCalls.length, 2)
+
+      for (const c of calls) {
+        if (c.path === '/cgi-bin/wedoc/document/batch_update') {
+          const b = c.body as { requests?: Array<Record<string, unknown>> }
+          const hasDelete = b.requests?.some(r => 'delete_content' in r)
+          const hasInsert = b.requests?.some(r => 'insert_text' in r)
+          if (hasDelete) {
+            assert.ok(hasInsert)
+          }
+        } else {
+          const body = c.body as Record<string, unknown> | undefined
+          assert.equal(Boolean(body && 'delete_content' in body), false)
+        }
+      }
+    }
+  })
+
+  it('treats sections as same and skips when custom same ignores 生成于 lines', async () => {
+    const docWithGen = 'Keel 周报\nacme/app\n周报 2026-11-20\ncontent\n生成于 2026-11-19 10:00\n'
+    const nextWithGen = '周报 2026-11-20\ncontent\n生成于 2026-11-19 11:00\n'
+    const { http, calls } = setupDocFake({ text: docWithGen })
+
+    const ignoreGenerated = (a: string, b: string) => {
+      const filter = (s: string) =>
+        s
+          .split('\n')
+          .filter(l => !l.startsWith('生成于'))
+          .join('\n')
+      return filter(a) === filter(b)
+    }
+
+    const res = await replaceSection(
+      http,
+      'doc1',
+      '周报 2026-11-20',
+      nextWithGen,
+      'if-different',
+      ignoreGenerated
+    )
+    assert.equal(res, 'skipped')
+    assert.equal(calls.filter(c => c.path === '/cgi-bin/wedoc/document/batch_update').length, 0)
+  })
+})

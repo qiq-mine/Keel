@@ -227,3 +227,158 @@ export async function resolveDocid(
 
   throw keelError('keel/wecom-docid-unreadable')
 }
+
+interface TextNode {
+  begin: number
+  end: number
+  text: string
+}
+
+function isTextNode(val: unknown): val is TextNode {
+  if (typeof val !== 'object' || val === null || Array.isArray(val)) {
+    return false
+  }
+  const obj = val as Record<string, unknown>
+  return (
+    typeof obj.begin === 'number' &&
+    typeof obj.end === 'number' &&
+    typeof obj.text === 'string'
+  )
+}
+
+function collectTextNodes(root: unknown): TextNode[] {
+  const nodes: TextNode[] = []
+  function walk(val: unknown): void {
+    if (typeof val !== 'object' || val === null) {
+      return
+    }
+    if (isTextNode(val)) {
+      nodes.push(val)
+      return
+    }
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        walk(item)
+      }
+      return
+    }
+    for (const key of Object.keys(val)) {
+      walk((val as Record<string, unknown>)[key])
+    }
+  }
+  walk(root)
+  return nodes
+}
+
+interface DocumentGetResponse {
+  version: number
+  document: unknown
+}
+
+export async function readDoc(
+  http: WecomHttp,
+  docid: string
+): Promise<{ version: number; text: string; offset: number }> {
+  const res = await http.call<DocumentGetResponse>('/cgi-bin/wedoc/document/get', { docid })
+  const nodes = collectTextNodes(res.document)
+  const { text, offset } = joinText(nodes)
+  return { version: res.version, text, offset }
+}
+
+export type ReplacePolicy = 'if-different' | 'if-missing'
+
+interface DeleteContentRequest {
+  delete_content: {
+    range: {
+      start_index: number
+      length: number
+    }
+  }
+}
+
+interface InsertTextRequest {
+  insert_text: {
+    text: string
+    location: {
+      index: number
+    }
+  }
+}
+
+type BatchUpdateRequest = DeleteContentRequest | InsertTextRequest
+
+export async function replaceSection(
+  http: WecomHttp,
+  docid: string,
+  title: string,
+  sectionText: string,
+  policy: ReplacePolicy,
+  same: (existing: string, next: string) => boolean = (a, b) => a === b
+): Promise<'written' | 'skipped'> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const doc = await readDoc(http, docid)
+    const range = sectionRange(doc.text, title)
+
+    if (range !== null) {
+      if (policy === 'if-missing') {
+        return 'skipped'
+      }
+      if (same(doc.text.slice(range.begin, range.end), sectionText)) {
+        return 'skipped'
+      }
+    }
+
+    let requests: BatchUpdateRequest[]
+
+    if (range !== null) {
+      requests = [
+        {
+          delete_content: {
+            range: {
+              start_index: doc.offset + range.begin,
+              length: range.end - range.begin
+            }
+          }
+        },
+        {
+          insert_text: {
+            text: sectionText,
+            location: {
+              index: doc.offset + range.begin
+            }
+          }
+        }
+      ]
+    } else {
+      let textToInsert = sectionText
+      if (doc.text.length > 0 && !doc.text.endsWith('\n')) {
+        textToInsert = '\n' + sectionText
+      }
+      requests = [
+        {
+          insert_text: {
+            text: textToInsert,
+            location: {
+              index: doc.offset + doc.text.length
+            }
+          }
+        }
+      ]
+    }
+
+    try {
+      await http.call('/cgi-bin/wedoc/document/batch_update', {
+        docid,
+        version: doc.version,
+        requests
+      })
+      return 'written'
+    } catch (err) {
+      if (attempt === 1) {
+        throw err
+      }
+    }
+  }
+
+  return 'written'
+}
