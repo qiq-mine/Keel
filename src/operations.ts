@@ -2,7 +2,7 @@ import type { Config } from './config.js'
 import { assertConfigured, readConnection } from './config.js'
 import { KeelError, keelError } from './errors.js'
 import { GitLabApi } from './gitlab/api.js'
-import { WecomHttp } from './wecom/http.js'
+import { WecomClients, WecomHttp } from './wecom/http.js'
 import {
   checkAsOf,
   previewReport,
@@ -46,6 +46,7 @@ export interface OperationContext {
   fetch?: typeof fetch
   log?: (line: string) => void
   sleep?: (ms: number) => Promise<void>
+  wecomClients?: WecomClients
   agents?: {
     get(id: SessionId): { followup(message: UserMessage): void } | undefined
     create(options: CreateAgentOptions): Promise<AgentHandle>
@@ -61,28 +62,33 @@ export async function connection(ctx: OperationContext, signal?: AbortSignal): P
 
   let wecomHealth: 'unconfigured' | 'ok' | 'error' = 'unconfigured'
   let wecomHealthDetail: string | null = null
-  if (!wecomConfigured) {
-    wecomHealth = 'unconfigured'
-    wecomHealthDetail = null
-  } else {
-    const c = await wecomClient(ctx)
-    if (c === null) {
+  try {
+    if (!wecomConfigured) {
       wecomHealth = 'unconfigured'
       wecomHealthDetail = null
     } else {
-      try {
-        await c.http.token()
-        wecomHealth = 'ok'
+      const c = await wecomClient(ctx)
+      if (c === null) {
+        wecomHealth = 'unconfigured'
         wecomHealthDetail = null
-      } catch (error) {
-        wecomHealth = 'error'
-        if (error instanceof KeelError && error.code === 'keel/wecom-unauthorized') {
-          wecomHealthDetail = '企业微信 Secret 无效或应用未授权'
-        } else {
-          wecomHealthDetail = '无法连接企业微信'
+      } else {
+        try {
+          await c.http.token(signal)
+          wecomHealth = 'ok'
+          wecomHealthDetail = null
+        } catch (error) {
+          wecomHealth = 'error'
+          if (error instanceof KeelError && error.code === 'keel/wecom-unauthorized') {
+            wecomHealthDetail = '企业微信 Secret 无效或应用未授权'
+          } else {
+            wecomHealthDetail = '无法连接企业微信'
+          }
         }
       }
     }
+  } catch {
+    wecomHealth = 'error'
+    wecomHealthDetail = '无法连接企业微信'
   }
 
   const shell = {
@@ -140,14 +146,15 @@ export async function wecomClient(ctx: OperationContext): Promise<{ http: WecomH
   if (secret === undefined || secret.trim() === '') {
     return null
   }
+  const opts = {
+    corpId: settings.wecomCorpId,
+    secret,
+    fetch: ctx.fetch,
+    log: ctx.log,
+    sleep: ctx.sleep,
+  }
   return {
-    http: new WecomHttp({
-      corpId: settings.wecomCorpId,
-      secret,
-      fetch: ctx.fetch,
-      log: ctx.log,
-      sleep: ctx.sleep,
-    }),
+    http: ctx.wecomClients ? ctx.wecomClients.get(opts) : new WecomHttp(opts),
     target: {
       spaceid: settings.wecomSpaceId,
       fatherid: settings.wecomFatherId,

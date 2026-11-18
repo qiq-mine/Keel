@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { KeelError } from '../src/errors.js'
-import { WecomHttp, type WecomHttpOptions } from '../src/wecom/http.js'
+import { WecomClients, WecomHttp, type WecomHttpOptions } from '../src/wecom/http.js'
 import { createFakeWecom } from './helpers/fake-wecom.js'
 
 const SECRET = 'test-wecom-secret'
@@ -1320,4 +1320,20 @@ test('gettoken first network error, then 429 errcode 45009, then 200 ok resolves
   assert.equal(tokenCalls, 3)
   assert.deepEqual(slept, [1000, 1000])
   assertNoSecrets(logs, caughtErrors)
+})
+
+test('WecomClients: same corpId+secret -> same instance; different secret -> new instance; different corpId -> new instance; back to first secret -> new instance', () => {
+  const clients = new WecomClients()
+  const c1 = clients.get({ corpId: 'corp-a', secret: 'secret-a' })
+  const c2 = clients.get({ corpId: 'corp-a', secret: 'secret-a' })
+  assert.equal(c1, c2)
+
+  const c3 = clients.get({ corpId: 'corp-a', secret: 'secret-b' })
+  assert.notEqual(c1, c3)
+
+  const c4 = clients.get({ corpId: 'corp-b', secret: 'secret-b' })
+  assert.notEqual(c3, c4)
+
+  const c5 = clients.get({ corpId: 'corp-a', secret: 'secret-a' })
+  assert.notEqual(c1, c5)
 })

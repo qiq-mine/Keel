@@ -6,6 +6,7 @@ import { KeelError } from './errors.js'
 import type { KeelConnection, KeelIssue, KeelLabel, KeelListPage, KeelListQuery, KeelMember, KeelProject, KeelRisk } from './model.js'
 import * as ops from './operations.js'
 import { ReportJobs, ReportStatus } from './report/run.js'
+import { WecomClients } from './wecom/http.js'
 
 declare module '@deepseek-ai/dsh-typert-protocol/types' {
   interface RemoteErrorDetailsMap {
@@ -40,6 +41,7 @@ declare module '@deepseek-ai/cordis' {
 
 export class KeelService extends TypertRemoteService {
   private readonly jobs = new ReportJobs()
+  private readonly wecomClients = new WecomClients()
 
   constructor(ctx: Context, private readonly config: Config) {
     super(ctx, 'keel')
@@ -182,6 +184,7 @@ export class KeelService extends TypertRemoteService {
       set: (ref, value) => credentials.set(credentialRef(ref), value),
       unset: ref => credentials.unset(credentialRef(ref)),
       jobs: this.jobs,
+      wecomClients: this.wecomClients,
     }
   }
 }

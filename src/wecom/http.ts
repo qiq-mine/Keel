@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { keelError } from '../errors.js'
 
 export interface WecomHttpOptions {
@@ -265,5 +266,22 @@ export class WecomHttp {
 
       throw mapErrcode(responseErrcode)
     }
+  }
+}
+
+export class WecomClients {
+  private cachedKey?: string
+  private cachedClient?: WecomHttp
+
+  get(options: WecomHttpOptions): WecomHttp {
+    const hash = createHash('sha256').update(options.secret).digest('hex')
+    const key = `${options.corpId}:${hash}`
+    if (this.cachedClient && this.cachedKey === key) {
+      return this.cachedClient
+    }
+    const client = new WecomHttp(options)
+    this.cachedKey = key
+    this.cachedClient = client
+    return client
   }
 }

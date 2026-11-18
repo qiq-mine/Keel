@@ -11,11 +11,21 @@ import {
   wecomClient,
 } from '../src/operations.js'
 import { ReportJobs } from '../src/report/run.js'
+import { WecomClients } from '../src/wecom/http.js'
 import { createFakeWecom, type FakeRouteHandler } from './helpers/fake-wecom.js'
 
 const SECRET = 'test-wecom-secret'
 const TOKEN = 'test-access-token'
 const CORP_ID = 'test-corp-id'
+
+function assertSafeJson(result: unknown, extraSecrets: string[] = []): void {
+  const serialized = JSON.stringify(result)
+  assert.equal(serialized.includes(SECRET), false, `Leaked SECRET in JSON: ${serialized}`)
+  assert.equal(serialized.includes(TOKEN), false, `Leaked TOKEN in JSON: ${serialized}`)
+  for (const s of extraSecrets) {
+    assert.equal(serialized.includes(s), false, `Leaked secret in JSON: ${serialized}`)
+  }
+}
 
 function fakeConfig(overrides: {
   baseUrl?: string
@@ -44,6 +54,7 @@ function createTestContext(options: {
   secrets?: Record<string, string | undefined>
   wecomRoutes?: Record<string, FakeRouteHandler>
   jobs?: ReportJobs
+  wecomClients?: WecomClients
   gitlabHandler?: (url: string, init?: RequestInit) => Response | Promise<Response>
 } = {}) {
   const gitlabUrls: string[] = []
@@ -61,7 +72,7 @@ function createTestContext(options: {
           ? (input as Request).url
           : String(input)
 
-    if (urlStr.includes('qyapi.weixin.qq.com') || urlStr.includes('/cgi-bin/')) {
+    if (new URL(urlStr).host === 'qyapi.weixin.qq.com') {
       return wecom.fetch(input, init)
     }
 
@@ -97,6 +108,7 @@ function createTestContext(options: {
     fetch: combinedFetch,
     sleep: async () => {},
     jobs: options.jobs,
+    wecomClients: options.wecomClients,
   }
 
   return {
@@ -131,7 +143,7 @@ test('wecomClient: secret resolving to empty string or whitespace -> null', asyn
   assert.equal(await wecomClient(ctx), null)
 })
 
-test('wecomClient: configured -> two calls return two different WecomHttp instances and fresh secret', async () => {
+test('wecomClient: configured -> two calls return two different WecomHttp instances', async () => {
   const { ctx, setSecret, getResolveCount } = createTestContext({
     configOverrides: { wecomCorpId: CORP_ID, wecomSpaceId: 'space-1', wecomFatherId: 'father-1' },
     secrets: { KEEL_WECOM_SECRET: SECRET },
@@ -151,6 +163,14 @@ test('wecomClient: configured -> two calls return two different WecomHttp instan
   assert.equal(getResolveCount(), initialResolves + 2)
 
   assert.notEqual(first.http, second.http)
+
+  // with a shared new WecomClients() and unchanged config the same instance
+  ctx.wecomClients = new WecomClients()
+  const third = await wecomClient(ctx)
+  const fourth = await wecomClient(ctx)
+  assert.ok(third)
+  assert.ok(fourth)
+  assert.equal(third.http, fourth.http)
 })
 
 test('connection(): GitLab NOT configured (baseUrl empty) but WeCom configured and gettoken ok', async () => {
@@ -171,10 +191,7 @@ test('connection(): GitLab NOT configured (baseUrl empty) but WeCom configured a
   assert.equal(res.wecomHealth, 'ok')
   assert.equal(res.wecomHealthDetail, null)
   assert.deepEqual(wecomCalls.map(c => c.path), ['/cgi-bin/gettoken'])
-
-  const serialized = JSON.stringify(res)
-  assert.equal(serialized.includes(SECRET), false)
-  assert.equal(serialized.includes(TOKEN), false)
+  assertSafeJson(res)
 })
 
 test('connection(): gettoken errcode 40001 -> wecomHealth error and proper detail', async () => {
@@ -193,6 +210,7 @@ test('connection(): gettoken errcode 40001 -> wecomHealth error and proper detai
   assert.equal(res.wecomHealth, 'error')
   assert.equal(res.wecomHealthDetail, '企业微信 Secret 无效或应用未授权')
   assert.deepEqual(wecomCalls.map(c => c.path), ['/cgi-bin/gettoken'])
+  assertSafeJson(res)
 })
 
 test('connection(): gettoken network error -> wecomHealth error and proper detail', async () => {
@@ -213,6 +231,7 @@ test('connection(): gettoken network error -> wecomHealth error and proper detai
   for (const call of wecomCalls) {
     assert.equal(call.path, '/cgi-bin/gettoken')
   }
+  assertSafeJson(res)
 })
 
 test('connection(): WeCom not configured -> unconfigured and zero WeCom requests', async () => {
@@ -224,6 +243,63 @@ test('connection(): WeCom not configured -> unconfigured and zero WeCom requests
   assert.equal(res.wecomHealth, 'unconfigured')
   assert.equal(res.wecomHealthDetail, null)
   assert.equal(wecomCalls.length, 0)
+  assertSafeJson(res)
+})
+
+test('connection(): with shared WecomClients, unchanged config sends one gettoken, secret change sends new gettoken with new secret in query', async () => {
+  const SECRET2 = 'test-wecom-secret-2'
+  const { ctx, wecomCalls, setSecret } = createTestContext({
+    configOverrides: { baseUrl: '', wecomCorpId: CORP_ID, wecomSpaceId: 'space-1', wecomFatherId: 'father-1' },
+    secrets: { KEEL_WECOM_SECRET: SECRET },
+    wecomClients: new WecomClients(),
+    wecomRoutes: {
+      '/cgi-bin/gettoken': {
+        errcode: 0,
+        access_token: TOKEN,
+        expires_in: 7200,
+      },
+    },
+  })
+
+  const res1 = await connection(ctx)
+  assert.equal(res1.wecomHealth, 'ok')
+  assertSafeJson(res1, [SECRET2])
+
+  const res2 = await connection(ctx)
+  assert.equal(res2.wecomHealth, 'ok')
+  assertSafeJson(res2, [SECRET2])
+
+  const gettokenCalls1 = wecomCalls.filter(c => c.path === '/cgi-bin/gettoken')
+  assert.equal(gettokenCalls1.length, 1)
+
+  setSecret('KEEL_WECOM_SECRET', SECRET2)
+
+  const res3 = await connection(ctx)
+  assert.equal(res3.wecomHealth, 'ok')
+  assertSafeJson(res3, [SECRET2])
+
+  const gettokenCalls2 = wecomCalls.filter(c => c.path === '/cgi-bin/gettoken')
+  assert.equal(gettokenCalls2.length, 2)
+  assert.equal(gettokenCalls2[1].query.corpsecret, SECRET2)
+})
+
+test('connection(): ctx.resolve throws for WeCom secret ref -> connection() resolves with wecomHealth error, detail 无法连接企业微信', async () => {
+  const { ctx } = createTestContext({
+    configOverrides: { baseUrl: '', wecomCorpId: CORP_ID, wecomSpaceId: 'space-1', wecomFatherId: 'father-1' },
+    secrets: { KEEL_WECOM_SECRET: SECRET },
+  })
+  const origResolve = ctx.resolve
+  ctx.resolve = async ref => {
+    if (ref === 'KEEL_WECOM_SECRET') {
+      throw new Error('resolve failed')
+    }
+    return origResolve(ref)
+  }
+
+  const res = await connection(ctx)
+  assert.equal(res.wecomHealth, 'error')
+  assert.equal(res.wecomHealthDetail, '无法连接企业微信')
+  assertSafeJson(res)
 })
 
 test('reportStart: write with asOf 31 minutes old rejects keel/report-stale and creates no job', async () => {
@@ -323,10 +399,44 @@ test('reportStart: write with WeCom not configured -> done, empty projects, zero
   assert.deepEqual(st.result.projects, [])
   assert.equal(st.result.message, KEEL_MESSAGES['keel/wecom-not-configured'])
   assert.equal(gitlabUrls.length, 0)
+  assertSafeJson(st)
+})
 
-  const serialized = JSON.stringify(st)
-  assert.equal(serialized.includes(SECRET), false)
-  assert.equal(serialized.includes(TOKEN), false)
+test('reportStart: preview with GitLab configured via fake GitLab fetch -> done, preview not null, zero recorded WeCom requests', async () => {
+  const jobs = new ReportJobs()
+  const { ctx, wecomCalls } = createTestContext({
+    jobs,
+    configOverrides: {
+      baseUrl: 'https://gitlab.example.com',
+      groupPath: 'my-group',
+      tokenRef: 'KEEL_GITLAB_TOKEN',
+      wecomCorpId: CORP_ID,
+      wecomSpaceId: 'space-1',
+      wecomFatherId: 'father-1',
+    },
+    secrets: {
+      KEEL_GITLAB_TOKEN: 'gitlab-token-val',
+      KEEL_WECOM_SECRET: SECRET,
+    },
+    wecomRoutes: {
+      '/cgi-bin/gettoken': {
+        errcode: 0,
+        access_token: TOKEN,
+        expires_in: 7200,
+      },
+    },
+  })
+
+  const freshAsOf = new Date().toISOString()
+  const { runId } = await reportStart(ctx, 'preview', freshAsOf)
+
+  await ctx.jobs!.idle()
+
+  const st = reportStatus(ctx, runId)
+  assert.equal(st.state, 'done')
+  assert.ok(st.preview !== null)
+  assert.equal(wecomCalls.length, 0)
+  assertSafeJson(st)
 })
 
 test('reportDeps: throws keel/not-configured if source called before projects', async () => {
