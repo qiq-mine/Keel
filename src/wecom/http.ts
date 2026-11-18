@@ -113,7 +113,17 @@ export class WecomHttp {
       if (res.status < 200 || res.status >= 300) {
         const errcode = await errcodeOf(res)
         this.logFn(`GET ${path} ${res.status} errcode=${errcode ?? '-'}`)
-        if (errcode !== null && errcode !== 45009 && errcode !== -1) throw keelError('keel/wecom-unauthorized')
+        if (errcode === 45009) {
+          if (attempt === 1) {
+            await this.sleepFn(1000)
+            continue
+          }
+          throw keelError('keel/wecom-unavailable')
+        }
+        if (errcode === -1) {
+          throw keelError('keel/wecom-unavailable')
+        }
+        if (errcode !== null) throw keelError('keel/wecom-unauthorized')
         throw keelError('keel/wecom-unavailable')
       }
 
@@ -134,6 +144,10 @@ export class WecomHttp {
           await this.sleepFn(1000)
           continue
         }
+        throw keelError('keel/wecom-unavailable')
+      }
+
+      if (errcode === -1) {
         throw keelError('keel/wecom-unavailable')
       }
 

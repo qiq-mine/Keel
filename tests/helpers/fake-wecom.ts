@@ -2,6 +2,7 @@ export interface RecordedCall {
   method: string
   path: string
   queryKeys: string[]
+  query: Record<string, string>
   body?: unknown
 }
 
@@ -13,7 +14,7 @@ export interface FakeRouteResponse {
 
 export type FakeRouteHandler =
   | FakeRouteResponse
-  | ((req: { method: string; path: string; queryKeys: string[]; body?: unknown }) => FakeRouteResponse | Promise<FakeRouteResponse>)
+  | ((req: { method: string; path: string; queryKeys: string[]; query?: Record<string, string>; body?: unknown }) => FakeRouteResponse | Promise<FakeRouteResponse>)
   | Record<string, unknown>
   | unknown[]
   | string
@@ -39,6 +40,7 @@ export function createFakeWecom(routes: Record<string, FakeRouteHandler> = {}) {
     const parsedUrl = new URL(urlStr, 'https://qyapi.weixin.qq.com')
     const path = parsedUrl.pathname
     const queryKeys = Array.from(parsedUrl.searchParams.keys())
+    const query: Record<string, string> = Object.fromEntries(parsedUrl.searchParams.entries())
     const method = (init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase()
 
     let body: unknown = undefined
@@ -59,6 +61,7 @@ export function createFakeWecom(routes: Record<string, FakeRouteHandler> = {}) {
       method,
       path,
       queryKeys,
+      query,
       body,
     })
 
@@ -72,10 +75,11 @@ export function createFakeWecom(routes: Record<string, FakeRouteHandler> = {}) {
 
     let resp: FakeRouteResponse
     if (typeof matchedHandler === 'function') {
-      resp = await (matchedHandler as (req: { method: string; path: string; queryKeys: string[]; body?: unknown }) => FakeRouteResponse | Promise<FakeRouteResponse>)({
+      resp = await (matchedHandler as (req: { method: string; path: string; queryKeys: string[]; query: Record<string, string>; body?: unknown }) => FakeRouteResponse | Promise<FakeRouteResponse>)({
         method,
         path,
         queryKeys,
+        query,
         body,
       })
     } else if (

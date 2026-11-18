@@ -970,3 +970,258 @@ test('first fetch throws network error, second succeeds for /cgi-bin/wedoc/docum
   assert.deepEqual(slept, [1000])
   assertNoSecrets(logs, caughtErrors)
 })
+
+test('gettoken returns 200 {errcode:45009} then 200 ok -> token() resolves, slept [1000]', async () => {
+  const logs: string[] = []
+  const caughtErrors: string[] = []
+  const slept: number[] = []
+  let attempts = 0
+
+  const { client } = createClient(
+    {
+      '/cgi-bin/gettoken': () => {
+        attempts++
+        if (attempts === 1) {
+          return {
+            status: 200,
+            body: { errcode: 45009, errmsg: 'system busy' },
+          }
+        }
+        return {
+          status: 200,
+          body: { errcode: 0, access_token: TOKEN, expires_in: 7200 },
+        }
+      },
+    },
+    {
+      sleep: async (ms: number) => {
+        slept.push(ms)
+      },
+    },
+    logs,
+  )
+
+  const token = await client.token()
+  assert.equal(token, TOKEN)
+  assert.equal(attempts, 2)
+  assert.deepEqual(slept, [1000])
+  assertNoSecrets(logs, caughtErrors)
+})
+
+test('gettoken returns 429 {errcode:45009} then 200 ok -> resolves, slept [1000]; twice 429 45009 -> rejects keel/wecom-unavailable', async () => {
+  const logs1: string[] = []
+  const caughtErrors1: string[] = []
+  const slept1: number[] = []
+  let attempts1 = 0
+
+  const { client: client1 } = createClient(
+    {
+      '/cgi-bin/gettoken': () => {
+        attempts1++
+        if (attempts1 === 1) {
+          return {
+            status: 429,
+            body: { errcode: 45009, errmsg: 'rate limit' },
+          }
+        }
+        return {
+          status: 200,
+          body: { errcode: 0, access_token: TOKEN, expires_in: 7200 },
+        }
+      },
+    },
+    {
+      sleep: async (ms: number) => {
+        slept1.push(ms)
+      },
+    },
+    logs1,
+  )
+
+  const token = await client1.token()
+  assert.equal(token, TOKEN)
+  assert.equal(attempts1, 2)
+  assert.deepEqual(slept1, [1000])
+  assertNoSecrets(logs1, caughtErrors1)
+
+  const logs2: string[] = []
+  const caughtErrors2: string[] = []
+  const slept2: number[] = []
+  let attempts2 = 0
+
+  const { client: client2 } = createClient(
+    {
+      '/cgi-bin/gettoken': () => {
+        attempts2++
+        return {
+          status: 429,
+          body: { errcode: 45009, errmsg: 'rate limit' },
+        }
+      },
+    },
+    {
+      sleep: async (ms: number) => {
+        slept2.push(ms)
+      },
+    },
+    logs2,
+  )
+
+  await assert.rejects(
+    async () => {
+      await client2.token()
+    },
+    (err: Error) => {
+      caughtErrors2.push(err.message)
+      assert.equal((err as KeelError).code, 'keel/wecom-unavailable')
+      assert.equal(err.message, '无法连接企业微信')
+      return true
+    },
+  )
+  assert.equal(attempts2, 2)
+  assert.deepEqual(slept2, [1000])
+  assertNoSecrets(logs2, caughtErrors2)
+})
+
+test('gettoken 200 {errcode:-1} -> rejects keel/wecom-unavailable', async () => {
+  const logs: string[] = []
+  const caughtErrors: string[] = []
+  const slept: number[] = []
+  let attempts = 0
+
+  const { client } = createClient(
+    {
+      '/cgi-bin/gettoken': () => {
+        attempts++
+        return {
+          status: 200,
+          body: { errcode: -1, errmsg: 'system error' },
+        }
+      },
+    },
+    {
+      sleep: async (ms: number) => {
+        slept.push(ms)
+      },
+    },
+    logs,
+  )
+
+  await assert.rejects(
+    async () => {
+      await client.token()
+    },
+    (err: Error) => {
+      caughtErrors.push(err.message)
+      assert.equal((err as KeelError).code, 'keel/wecom-unavailable')
+      assert.equal(err.message, '无法连接企业微信')
+      return true
+    },
+  )
+  assert.equal(attempts, 1)
+  assert.deepEqual(slept, [])
+  assertNoSecrets(logs, caughtErrors)
+})
+
+test('batch_update (/cgi-bin/wedoc/document/batch_update) network error rejects keel/wecom-unavailable, called once, sleep never called', async () => {
+  const logs: string[] = []
+  const caughtErrors: string[] = []
+  const slept: number[] = []
+  let batchUpdateCalls = 0
+
+  const { client } = createClient(
+    {
+      '/cgi-bin/gettoken': {
+        body: { errcode: 0, access_token: TOKEN, expires_in: 7200 },
+      },
+      '/cgi-bin/wedoc/document/batch_update': () => {
+        batchUpdateCalls++
+        throw new Error('network error')
+      },
+    },
+    {
+      sleep: async (ms: number) => {
+        slept.push(ms)
+      },
+    },
+    logs,
+  )
+
+  await assert.rejects(
+    async () => {
+      await client.call('/cgi-bin/wedoc/document/batch_update', {})
+    },
+    (err: Error) => {
+      caughtErrors.push(err.message)
+      assert.equal((err as KeelError).code, 'keel/wecom-unavailable')
+      assert.equal(err.message, '无法连接企业微信')
+      return true
+    },
+  )
+
+  assert.equal(batchUpdateCalls, 1)
+  assert.deepEqual(slept, [])
+  assertNoSecrets(logs, caughtErrors)
+})
+
+test('log sanitizing masks access_token, corpsecret, and key', () => {
+  const logs: string[] = []
+  const fake = createFakeWecom({
+    '/cgi-bin/gettoken': {
+      status: 200,
+      body: { errcode: 0, access_token: TOKEN },
+    },
+  })
+  const client = new WecomHttp({
+    corpId: CORP_ID,
+    secret: SECRET,
+    fetch: fake.fetch,
+    log: (line: string) => {
+      logs.push(line)
+    },
+  })
+
+  ;(client as unknown as { logFn: (l: string) => void }).logFn(
+    'GET /x?access_token=abc&corpsecret=def&key=ghi 200 errcode=0',
+  )
+
+  assert.equal(logs.length, 1)
+  assert.equal(logs[0], 'GET /x?access_token=***&corpsecret=***&key=*** 200 errcode=0')
+})
+
+test('request placement: query params and body secrets', async () => {
+  const logs: string[] = []
+  const caughtErrors: string[] = []
+  const { client, fake } = createClient(
+    {
+      '/cgi-bin/gettoken': {
+        body: { errcode: 0, access_token: TOKEN },
+      },
+      '/cgi-bin/wedoc/document/get': {
+        body: { errcode: 0, title: 'Document Title' },
+      },
+    },
+    logs,
+  )
+
+  await client.call('/cgi-bin/wedoc/document/get', { docid: 'd' })
+
+  assert.equal(fake.calls.length, 2)
+  const tokenCall = fake.calls[0]
+  const docCall = fake.calls[1]
+
+  assert.equal(tokenCall.path, '/cgi-bin/gettoken')
+  assert.equal(tokenCall.query.corpsecret, 'test-wecom-secret')
+
+  assert.equal(docCall.path, '/cgi-bin/wedoc/document/get')
+  assert.equal(docCall.query.access_token, 'test-access-token')
+  assert.equal('corpsecret' in docCall.query, false)
+
+  for (const call of fake.calls) {
+    const bodyStr = typeof call.body === 'string' ? call.body : JSON.stringify(call.body ?? '')
+    assert.equal(bodyStr.includes('test-wecom-secret'), false)
+    assert.equal(bodyStr.includes('test-access-token'), false)
+  }
+
+  assertNoSecrets(logs, caughtErrors)
+})
