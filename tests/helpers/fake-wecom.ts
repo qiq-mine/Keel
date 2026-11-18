@@ -14,7 +14,7 @@ export interface FakeRouteResponse {
 
 export type FakeRouteHandler =
   | FakeRouteResponse
-  | ((req: { method: string; path: string; queryKeys: string[]; query?: Record<string, string>; body?: unknown }) => FakeRouteResponse | Promise<FakeRouteResponse>)
+  | ((req: { method: string; path: string; queryKeys: string[]; query: Record<string, string>; body?: unknown }) => FakeRouteResponse | Promise<FakeRouteResponse>)
   | Record<string, unknown>
   | unknown[]
   | string

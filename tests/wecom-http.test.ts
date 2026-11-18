@@ -1225,3 +1225,99 @@ test('request placement: query params and body secrets', async () => {
 
   assertNoSecrets(logs, caughtErrors)
 })
+
+test('gettoken 502 with errcode -1 rejects keel/wecom-unavailable with slept []', async () => {
+  const logs: string[] = []
+  const caughtErrors: string[] = []
+  const slept: number[] = []
+  const { client } = createClient(
+    {
+      '/cgi-bin/gettoken': {
+        status: 502,
+        body: { errcode: -1 },
+      },
+    },
+    { sleep: async (ms: number) => { slept.push(ms) } },
+    logs,
+  )
+
+  await assert.rejects(
+    () => client.token(),
+    (err: Error) => {
+      caughtErrors.push(err.message)
+      assert.equal((err as KeelError).code, 'keel/wecom-unavailable')
+      return true
+    },
+  )
+
+  assert.deepEqual(slept, [])
+  assertNoSecrets(logs, caughtErrors)
+})
+
+test('gettoken always 200 errcode 45009 rejects keel/wecom-unavailable, called 2 times, slept [1000]', async () => {
+  const logs: string[] = []
+  const caughtErrors: string[] = []
+  const slept: number[] = []
+  let tokenCalls = 0
+  const { client } = createClient(
+    {
+      '/cgi-bin/gettoken': () => {
+        tokenCalls++
+        return {
+          status: 200,
+          body: { errcode: 45009 },
+        }
+      },
+    },
+    { sleep: async (ms: number) => { slept.push(ms) } },
+    logs,
+  )
+
+  await assert.rejects(
+    () => client.token(),
+    (err: Error) => {
+      caughtErrors.push(err.message)
+      assert.equal((err as KeelError).code, 'keel/wecom-unavailable')
+      return true
+    },
+  )
+
+  assert.equal(tokenCalls, 2)
+  assert.deepEqual(slept, [1000])
+  assertNoSecrets(logs, caughtErrors)
+})
+
+test('gettoken first network error, then 429 errcode 45009, then 200 ok resolves, slept [1000, 1000]', async () => {
+  const logs: string[] = []
+  const caughtErrors: string[] = []
+  const slept: number[] = []
+  let tokenCalls = 0
+  const { client } = createClient(
+    {
+      '/cgi-bin/gettoken': () => {
+        tokenCalls++
+        if (tokenCalls === 1) {
+          throw new Error('network failure')
+        }
+        if (tokenCalls === 2) {
+          return {
+            status: 429,
+            body: { errcode: 45009 },
+          }
+        }
+        return {
+          status: 200,
+          body: { errcode: 0, access_token: TOKEN },
+        }
+      },
+    },
+    { sleep: async (ms: number) => { slept.push(ms) } },
+    logs,
+  )
+
+  const token = await client.token()
+  assert.equal(token, TOKEN)
+  assert.equal(tokenCalls, 3)
+  assert.deepEqual(slept, [1000, 1000])
+  assertNoSecrets(logs, caughtErrors)
+})

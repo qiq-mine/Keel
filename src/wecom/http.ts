@@ -84,9 +84,9 @@ export class WecomHttp {
     })
     const url = `${WECOM_HOST}${path}?${params.toString()}`
 
-    let attempt = 0
+    let netRetried = false
+    let rateRetried = false
     while (true) {
-      attempt++
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs)
       const combinedSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
@@ -101,7 +101,8 @@ export class WecomHttp {
       } catch (error) {
         if (signal?.aborted) throw error
         this.logFn(`GET ${path} - errcode=-`)
-        if (attempt === 1) {
+        if (!netRetried) {
+          netRetried = true
           await this.sleepFn(1000)
           continue
         }
@@ -114,7 +115,8 @@ export class WecomHttp {
         const errcode = await errcodeOf(res)
         this.logFn(`GET ${path} ${res.status} errcode=${errcode ?? '-'}`)
         if (errcode === 45009) {
-          if (attempt === 1) {
+          if (!rateRetried) {
+            rateRetried = true
             await this.sleepFn(1000)
             continue
           }
@@ -140,7 +142,8 @@ export class WecomHttp {
       this.logFn(`GET ${path} ${res.status} errcode=${errcode}`)
 
       if (errcode === 45009) {
-        if (attempt === 1) {
+        if (!rateRetried) {
+          rateRetried = true
           await this.sleepFn(1000)
           continue
         }

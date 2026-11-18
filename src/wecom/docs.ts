@@ -16,12 +16,13 @@ export function docName(pathWithNamespace: string): string {
 }
 
 export function docidFromUrl(url: string): string | null {
+  const base = url.split(/[?#]/)[0]
   const marker = '/doc/'
-  const idx = url.indexOf(marker)
+  const idx = base.indexOf(marker)
   if (idx === -1) {
     return null
   }
-  const rest = url.slice(idx + marker.length)
+  const rest = base.slice(idx + marker.length)
   let endIdx = rest.length
   for (let i = 0; i < rest.length; i++) {
     const ch = rest[i]

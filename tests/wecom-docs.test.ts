@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { describe, it } from 'node:test'
+import { KeelError } from '../src/errors.js'
 import {
   docHeader,
   docidFromUrl,
@@ -22,7 +24,19 @@ describe('docName', () => {
     const hexSuffix = result.slice(241)
     assert.equal(hexSuffix.length, 14)
     assert.match(hexSuffix, /^[0-9a-f]{14}$/)
+    assert.equal(hexSuffix, createHash('sha256').update(longPath).digest('hex').slice(0, 14))
     assert.equal(result, docName(longPath))
+
+    const longPathWithSlashes = 'group/subgroup/project/' + 'b'.repeat(277)
+    const resultWithSlashes = docName(longPathWithSlashes)
+    assert.equal([...resultWithSlashes].length, 255)
+    assert.equal(resultWithSlashes[240], '-')
+    const hexSuffixWithSlashes = resultWithSlashes.slice(241)
+    assert.equal(hexSuffixWithSlashes.length, 14)
+    assert.equal(
+      hexSuffixWithSlashes,
+      createHash('sha256').update(longPathWithSlashes).digest('hex').slice(0, 14),
+    )
   })
 
   it('returns unchanged when result has exactly 255 code points', () => {
@@ -48,6 +62,7 @@ describe('docidFromUrl', () => {
 
   it('returns null for non-doc URLs and empty doc segment', () => {
     assert.equal(docidFromUrl('https://doc.weixin.qq.com/sheet/x'), null)
+    assert.equal(docidFromUrl('https://doc.weixin.qq.com/sheet/x?u=/doc/w3_X'), null)
     assert.equal(docidFromUrl('https://doc.weixin.qq.com/doc/'), null)
     assert.equal(docidFromUrl('.../doc/'), null)
     assert.equal(docidFromUrl('https://doc.weixin.qq.com/doc/?query=1'), null)
@@ -70,8 +85,7 @@ describe('joinText', () => {
     assert.throws(
       () => joinText([{ begin: 0, end: 10, text: 'short' }]),
       (err: unknown) => {
-        const e = err as { code?: string; message?: string }
-        return e.code === 'keel/wecom-doc-index' || e.message?.includes('keel/wecom-doc-index') === true
+        return err instanceof KeelError && err.code === 'keel/wecom-doc-index'
       }
     )
   })
@@ -84,8 +98,7 @@ describe('joinText', () => {
           { begin: 6, end: 11, text: 'world' }
         ]),
       (err: unknown) => {
-        const e = err as { code?: string; message?: string }
-        return e.code === 'keel/wecom-doc-index' || e.message?.includes('keel/wecom-doc-index') === true
+        return err instanceof KeelError && err.code === 'keel/wecom-doc-index'
       }
     )
   })
