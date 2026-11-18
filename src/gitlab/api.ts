@@ -10,10 +10,47 @@ import { createIssueBody, issueParams, summaryQuery } from '../board/query.js'
 import { dueDateUpdate, parseDueInput, RISK_LABELS, RISK_META, riskUpdate, stateUpdate, type RiskLevel } from '../risk.js'
 import { STATUS_LABELS, STATUS_META, statusUpdate, type StatusLevel } from '../status.js'
 import { GitLabHttp, nextPageOf, totalOf, type GitLabRequest } from './http.js'
-import { mapIssue, mapNote } from './map.js'
+import { mapIssue, mapNote, mapReportIssue, mapReportLabelEvent } from './map.js'
 
 const PAGE_CAP = 20
 const PAGE_SIZE = 100
+
+export interface ReportIssue {
+  projectId: number
+  projectPath: string
+  iid: number
+  title: string
+  confidential: boolean
+  webUrl: string | null
+  assignees: { id: number, name: string }[]
+  createdAt: string
+  closedAt: string | null
+}
+
+export interface ReportLabelEvent {
+  id: number
+  action: string
+  labelName: string | null
+  createdAt: string
+}
+
+export type ReportIssueQuery = Record<string, string>
+
+// 周报查询只允许这些键，其他键在发出前拒绝。with_labels_details、per_page、page 由 reportIssues 自己写入。
+const REPORT_QUERY_KEYS = new Set([
+  'state',
+  'created_after',
+  'created_before',
+  'updated_after',
+  'updated_before',
+  'due_date',
+  'labels',
+  'order_by',
+  'sort',
+  'with_labels_details',
+  'per_page',
+  'page',
+])
 
 export interface GitLabApiOptions {
   baseUrl: string
@@ -225,6 +262,54 @@ export class GitLabApi {
       nextPage,
       truncated: page === PAGE_CAP && nextPage !== null,
     }
+  }
+
+  async reportIssues(
+    projectId: number,
+    params: ReportIssueQuery,
+    projects: Map<number, string>,
+    signal?: AbortSignal,
+  ): Promise<{ issues: ReportIssue[], truncated: boolean }> {
+    const projectPath = projects.get(projectId)
+    if (projectPath === undefined) throw keelError('keel/outside-group')
+    if (Object.keys(params).some(key => !REPORT_QUERY_KEYS.has(key))) throw keelError('keel/invalid-input')
+    const issues: ReportIssue[] = []
+    for (let page = 1; page <= PAGE_CAP; page += 1) {
+      const response = await this.http.send({
+        method: 'GET',
+        path: `/projects/${projectId}/issues`,
+        query: { ...params, with_labels_details: 'true', per_page: PAGE_SIZE, page },
+      }, signal)
+      const body = response.text === '' ? [] : JSON.parse(response.text) as unknown[]
+      if (!Array.isArray(body)) throw keelError('keel/invalid-input')
+      issues.push(...body.map(row => mapReportIssue(row, projectId, projectPath)))
+      const next = nextPageOf(response.headers)
+      if (next === null) return { issues, truncated: false }
+      if (page === PAGE_CAP) return { issues, truncated: true }
+    }
+    return { issues, truncated: false }
+  }
+
+  async labelEvents(projectId: number, iid: number, projects: Map<number, string>, signal?: AbortSignal): Promise<{
+    events: ReportLabelEvent[]
+    truncated: boolean
+  }> {
+    if (!projects.has(projectId)) throw keelError('keel/outside-group')
+    const events: ReportLabelEvent[] = []
+    for (let page = 1; page <= PAGE_CAP; page += 1) {
+      const response = await this.http.send({
+        method: 'GET',
+        path: `/projects/${projectId}/issues/${iid}/resource_label_events`,
+        query: { per_page: PAGE_SIZE, page },
+      }, signal)
+      const body = response.text === '' ? [] : JSON.parse(response.text) as unknown[]
+      if (!Array.isArray(body)) throw keelError('keel/invalid-input')
+      events.push(...body.map(mapReportLabelEvent))
+      const next = nextPageOf(response.headers)
+      if (next === null) return { events, truncated: false }
+      if (page === PAGE_CAP) return { events, truncated: true }
+    }
+    return { events, truncated: false }
   }
 
   async createIssue(input: KeelCreateInput, projects: Map<number, string>, signal?: AbortSignal): Promise<KeelIssue> {

@@ -1,4 +1,5 @@
 import type { KeelAssignee, KeelIssue, KeelLabel, KeelNote } from '../model.js'
+import type { ReportIssue, ReportLabelEvent } from './api.js'
 import { keelError } from '../errors.js'
 import { parseRisk } from '../risk.js'
 import { parseStatus } from '../status.js'
@@ -60,6 +61,33 @@ export function mapNote(raw: unknown): KeelNote {
   }
 }
 
+// projectId 与 projectPath 来自查询所在的允许项目，不信任响应里的 project_id。
+export function mapReportIssue(raw: unknown, projectId: number, projectPath: string): ReportIssue {
+  const issue = asRecord(raw)
+  return {
+    projectId,
+    projectPath,
+    iid: asNumber(issue.iid, 'iid'),
+    title: asString(issue.title, 'title'),
+    confidential: issue.confidential === true,
+    webUrl: typeof issue.web_url === 'string' && issue.web_url !== '' ? issue.web_url : null,
+    assignees: mapReportAssignees(issue.assignees),
+    createdAt: asString(issue.created_at, 'created_at'),
+    closedAt: typeof issue.closed_at === 'string' && issue.closed_at !== '' ? issue.closed_at : null,
+  }
+}
+
+export function mapReportLabelEvent(raw: unknown): ReportLabelEvent {
+  const event = asRecord(raw)
+  const label = typeof event.label === 'object' && event.label !== null ? asRecord(event.label) : {}
+  return {
+    id: asNumber(event.id, 'id'),
+    action: asString(event.action, 'action'),
+    labelName: typeof label.name === 'string' ? label.name : null,
+    createdAt: asString(event.created_at, 'created_at'),
+  }
+}
+
 function mapLabels(value: unknown): KeelLabel[] {
   if (!Array.isArray(value)) return []
   return value.flatMap(item => {
@@ -78,6 +106,16 @@ function mapAssignees(value: unknown): KeelAssignee[] {
     const record = asRecord(item)
     if (typeof record.id !== 'number' || typeof record.username !== 'string' || typeof record.name !== 'string') return []
     return [{ id: record.id, username: record.username, name: record.name }]
+  })
+}
+
+function mapReportAssignees(value: unknown): { id: number, name: string }[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap(item => {
+    if (typeof item !== 'object' || item === null) return []
+    const record = asRecord(item)
+    if (typeof record.id !== 'number' || typeof record.name !== 'string') return []
+    return [{ id: record.id, name: record.name }]
   })
 }
 
