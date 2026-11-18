@@ -24,7 +24,7 @@
 - 不做智能表格、每周新开一份文档、飞书或邮件导出。
 - 不做跨进程锁。仍假定一组只跑一个 `dsh web`。
 - 不做历史周批量回补。错过不止一个周五时，只按补跑规则处理最近的那个。
-- 企业微信群机器人推送不在默认范围内。第 8 节写了它的设计，用户确认后作为单独的可选任务 R1 实施。
+- 不做企业微信群机器人推送。用户已确认周报只写企业微信文档（见第 8 节）。
 
 ## 2. 现状：main 上已经有什么
 
@@ -229,25 +229,9 @@ interface ReportResult {
 - 预览和写入期间显示进度「已完成 3 / 12 个仓库」。
 - 标题栏在按钮旁显示 `connection.lastReport`：「上次周报：11-20 10:00 写入 3 跳过 1 失败 0」。
 
-## 8. 企业微信群机器人推送（可选任务 R1，默认不实施）
+## 8. 企业微信群机器人推送：不做
 
-主设计选的是企业微信文档，配置里也只有文档所需的企业 ID、应用 Secret、空间和目录，没有群机器人地址。群机器人和文档是两条不同的产品线。下面的设计只在用户确认需要「写完文档后在群里发一条摘要」时实施，届时作为 R1 任务单独交付，并同步修改主设计。
-
-- 用途：文档写完后，向一个群发一条摘要，带各项目四项计数和文档链接。文档仍是周报的正本，群消息只是通知。
-- 配置：新增 `wecomWebhookRef`，凭据引用名，默认 `KEEL_WECOM_WEBHOOK`。凭据里只存 webhook 的 `key`，不存整段 URL。地址固定为 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<key>`，其他主机发出前拒绝。`key` 为空表示不推送。
-- 格式：`msgtype` 为 `markdown`。官方限制 `content` 最长 4096 字节（UTF-8）。正文示例：
-
-  ```markdown
-  **Keel 周报 2026-11-20**（2026-11-16 00:00 至 2026-11-20 10:00）
-  > acme/app：新建 1 · 关闭 0 · 逾期 <font color="warning">1</font> · 高风险变动 1 · [文档](https://doc.weixin.qq.com/...)
-  > acme/web：新建 0 · 关闭 2 · 逾期 0 · 高风险变动 0 · [文档](https://doc.weixin.qq.com/...)
-  ```
-
-  只发计数和链接，不发议题标题，因此保密议题不会进群。
-- 拆分：按行累积，加入下一行后 UTF-8 字节数会超过 3900（留出分页标记的余量）就另起一条。单行本身超过 3900 字节时按码点截断加 `…`。拆成多条时每条首行写 `**Keel 周报 2026-11-20（1/3）**`。
-- 频率：官方限制每个机器人每分钟 20 条。多条之间间隔 3.5 秒串行发送。返回 `errcode` 45009（频率超限）时等待 60 秒重试一次。
-- 错误：`errcode` 93000（webhook 无效）或其他非 0 值记为推送失败，不影响已经写好的文档，结果里另有一项 `notify: 'sent' | 'skipped' | 'failed'`。
-- 秘密：`key` 只出现在请求 URL 里。日志写成 `POST /cgi-bin/webhook/send 200 errcode=0`，不带查询串。错误对象和 Remote 响应里不出现 `key`。
+用户已确认：周报只写企业微信文档，不向群机器人推送摘要。第二阶段不新增 webhook 配置字段、凭据引用或 `webhook/send` 路径。以后如果需要群通知，另写设计再做。
 
 ## 9. 写入、批准与连接健康
 
@@ -306,7 +290,7 @@ interface ReportIssue {
 
 `file_list` 按官方的 `start` / `limit` 分页（`limit` 取 1000），跟随响应的 `has_more` 和 `next_start` 直到没有下一页，最多 20 页。到第 20 页仍有下一页时该项目失败，错误 `keel/wecom-ambiguous-doc`，不创建文档，因为看不全目录就无法保证不重复创建。
 
-企业微信 HTTP 只允许：`GET /cgi-bin/gettoken`、`POST /cgi-bin/wedrive/file_list`、`POST /cgi-bin/wedoc/create_doc`、`POST /cgi-bin/wedoc/document/get`、`POST /cgi-bin/wedoc/document/batch_update`（R1 实施时再加 `POST /cgi-bin/webhook/send`）。企业微信永远不用 `allowSelfSigned`。
+企业微信 HTTP 只允许：`GET /cgi-bin/gettoken`、`POST /cgi-bin/wedrive/file_list`、`POST /cgi-bin/wedoc/create_doc`、`POST /cgi-bin/wedoc/document/get`、`POST /cgi-bin/wedoc/document/batch_update`。企业微信永远不用 `allowSelfSigned`。
 
 ### 新增错误码
 
@@ -380,7 +364,7 @@ DSH 0.2.2 没有计划任务服务，因此第二阶段的定时是插件进程�
 
 ### 假企业微信
 
-`tests/helpers/fake-wecom.ts` 实现五个接口，记录每次请求（路径、查询键、请求体），可以配置：`gettoken` 失败、`access_token` 第一次过期、`create_doc` 超时但实际已创建、`batch_update` 第一次失败、限流一次、任意接口返回指定 `errcode`。文档内容保存在假服务内存里，`batch_update` 真的修改它，便于断言最终文本。R1 实施时同一文件再加 `webhook/send`，断言每条 `content` 不超过 4096 字节、多条之间有间隔（用注入的 `sleep` 计数，不真等）。
+`tests/helpers/fake-wecom.ts` 实现五个接口，记录每次请求（路径、查询键、请求体），可以配置：`gettoken` 失败、`access_token` 第一次过期、`create_doc` 超时但实际已创建、`batch_update` 第一次失败、限流一次、任意接口返回指定 `errcode`。文档内容保存在假服务内存里，`batch_update` 真的修改它，便于断言最终文本。
 
 ### 必须覆盖
 
@@ -458,13 +442,7 @@ DSH 0.2.2 没有计划任务服务，因此第二阶段的定时是插件进程�
 - 内容：第 11 节的定时与补跑；按第 12 节修改主设计；README 增加「企业微信周报」一节（配置、权限、预览、定时只在 `dsh web` 运行时有效）。
 - 验收：第 13 节「定时」通过；卸载插件后没有残留定时器（测试里用注入的 `setTimeout`/`clearTimeout` 计数）；README 与主设计不再写「下一版」；在测试企业微信空间手动跑一次立即生成：每个项目一份文档，标题 `周报 F`，再跑一次显示「已跳过」，`dsh` 日志里搜不到 Secret 和 `access_token`。
 
-### R1 群机器人推送（仅在用户确认后）
+## 15. 已确认的决定
 
-- 文件：`src/config.ts`（`wecomWebhookRef`）、`src/wecom/notify.ts`、`tests/wecom-notify.test.ts`，以及设置界面的一个输入框。
-- 内容：第 8 节全部。
-- 验收：每条消息 `content` 不超过 4096 字节；超长时拆成带 `（i/n）` 的多条；消息间隔和 45009 重试用注入的 `sleep` 验证；日志、错误和 Remote 返回值里搜不到测试 `key`；推送失败不影响文档结果。
-
-## 15. 待确认
-
-1. 周报的出口：继续按主设计写企业微信文档（本文默认），还是需要第 8 节的群机器人摘要（R1），或者只要群机器人、不要文档。
-2. 「按负责人」一段是否保留。它让每份周报多出 N 行，团队 5 到 15 人时可接受。
+1. 周报只写企业微信文档，不做群机器人推送（原可选任务 R1 取消）。
+2. 保留「按负责人」一段。
