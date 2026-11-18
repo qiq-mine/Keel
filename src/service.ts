@@ -20,6 +20,14 @@ declare module '@deepseek-ai/dsh-typert-protocol/types' {
     'keel/gitlab-tls': { readonly status?: number }
     'keel/session-unavailable': { readonly status?: number }
     'keel/wecom-not-configured': { readonly status?: number }
+    'keel/wecom-unavailable': { readonly status?: number }
+    'keel/wecom-unauthorized': { readonly status?: number }
+    'keel/wecom-forbidden': { readonly status?: number }
+    'keel/wecom-ambiguous-doc': { readonly status?: number }
+    'keel/wecom-docid-unreadable': { readonly status?: number }
+    'keel/wecom-doc-index': { readonly status?: number }
+    'keel/wecom-rejected': { readonly status?: number }
+    'keel/report-stale': { readonly status?: number }
   }
 }
 
