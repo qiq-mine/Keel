@@ -4,9 +4,9 @@ Keel 是装进团队 DeepSeek Harness（DSH）`web` profile 的插件。它给 5
 
 看板的事实来源是团队自建的 GitLab。状态列使用约定标签 `status::todo`、`status::doing`、`status::blocked`、`status::done`。某个仓库的议题上还没有这些标签时，看板回退为「打开」和「已关闭」。截止日期写回 Issue 的 `due_date`，风险写回 `risk::low`、`risk::medium`、`risk::high`。Keel 不另建一套本地台账。
 
-企业微信周报和月报按设计留到下一版。这一版可以先记下企业 ID、空间、目录和应用 Secret，但不会调用企业微信，也不会追加文档。
+同时支持按仓库长期保留的企业微信周报与月报。每个 GitLab 仓库在企业微信微盘指定目录下对应一份文档，每周五 10:00（Asia/Shanghai）自动追加周报小节，月末最后一个周五自动追加月报；也可在看板界面上先预览再写入。
 
-完整设计见 [docs/superpowers/specs/2026-11-18-keel-design.md](docs/superpowers/specs/2026-11-18-keel-design.md)。实现计划见 [docs/superpowers/plans/2026-11-18-keel-board-core.md](docs/superpowers/plans/2026-11-18-keel-board-core.md)。
+完整设计见 [docs/superpowers/specs/2026-11-18-keel-design.md](docs/superpowers/specs/2026-11-18-keel-design.md) 和 [docs/superpowers/specs/2026-11-18-keel-weekly-report-design.md](docs/superpowers/specs/2026-11-18-keel-weekly-report-design.md)。实现计划见 [docs/superpowers/plans/2026-11-18-keel-board-core.md](docs/superpowers/plans/2026-11-18-keel-board-core.md)。
 
 ## 安装
 
@@ -60,6 +60,15 @@ dsh plugin --profile web remove keel
 「送到会话分析」把这一条议题放进当前会话或一个新会话，供只读分析。
 
 Agent 可以使用 `keel_list_issues`、`keel_list_high_risk`、`keel_list_overdue`、`keel_list_due_this_week`、`keel_list_unassessed`、`keel_get_issue`、`keel_list_notes`。`keel_create_issue`、`keel_set_due_date`、`keel_set_risk`、`keel_set_status`、`keel_set_state` 在真正写入前会请求一次 DSH 批准，只有 `allowed-once` 才会发请求。
+
+## 企业微信周报
+
+Keel 支持按仓库长期维护一份企业微信文档，记录各周的交付变化与状态分布。
+
+- **配置**：在连接表单或 DSH 设置中配置企业 ID（`wecomCorpId`）、微盘空间（`wecomSpaceId`）、微盘目录（`wecomFatherId`）以及应用 Secret（保存在 DSH 凭据库，默认引用名 `KEEL_WECOM_SECRET`）。
+- **权限**：企业微信自建应用必须具备微文档（`wedoc`）和微盘（`wedrive`）权限。
+- **手动预览与写入**：点击看板标题栏的「立即生成本周周报」，会弹出预览对话框，展示各仓库本周的四项指标、当前快照（进行中/阻塞/高风险）和按负责人分布。确认无误后点击「写入企业微信」执行写入；正文相同则跳过。
+- **定时与补跑**：在 `dsh web` 运行期间，每周五 10:00（Asia/Shanghai）自动执行周报生成并写入；月末最后一个周五自动聚合月报。进程启动时若刚过周五（周一 10:00 前），会自动执行补跑。定时器仅在进程运行时有效。
 
 ## 开发
 
