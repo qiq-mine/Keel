@@ -5,6 +5,8 @@ import type { Config } from './config.js'
 import { KeelError } from './errors.js'
 import type { KeelConnection, KeelIssue, KeelLabel, KeelListPage, KeelListQuery, KeelMember, KeelProject, KeelRisk } from './model.js'
 import * as ops from './operations.js'
+import { ReportJobs, ReportStatus } from './report/run.js'
+import { WecomClients } from './wecom/http.js'
 
 declare module '@deepseek-ai/dsh-typert-protocol/types' {
   interface RemoteErrorDetailsMap {
@@ -20,6 +22,14 @@ declare module '@deepseek-ai/dsh-typert-protocol/types' {
     'keel/gitlab-tls': { readonly status?: number }
     'keel/session-unavailable': { readonly status?: number }
     'keel/wecom-not-configured': { readonly status?: number }
+    'keel/wecom-unavailable': { readonly status?: number }
+    'keel/wecom-unauthorized': { readonly status?: number }
+    'keel/wecom-forbidden': { readonly status?: number }
+    'keel/wecom-ambiguous-doc': { readonly status?: number }
+    'keel/wecom-docid-unreadable': { readonly status?: number }
+    'keel/wecom-doc-index': { readonly status?: number }
+    'keel/wecom-rejected': { readonly status?: number }
+    'keel/report-stale': { readonly status?: number }
   }
 }
 
@@ -30,6 +40,9 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export class KeelService extends TypertRemoteService {
+  private readonly jobs = new ReportJobs()
+  private readonly wecomClients = new WecomClients()
+
   constructor(ctx: Context, private readonly config: Config) {
     super(ctx, 'keel')
   }
@@ -129,6 +142,16 @@ export class KeelService extends TypertRemoteService {
     return this.run(signal, ctx => ops.analyzeIssue(ctx, { projectId, iid, sessionId, agentPreset }, signal))
   }
 
+  @Remote
+  reportStart(mode: string, asOf: string, signal: AbortSignal): Promise<{ runId: string }> {
+    return this.run(signal, ctx => ops.reportStart(ctx, mode, asOf))
+  }
+
+  @Remote
+  reportStatus(runId: string, signal: AbortSignal): Promise<ReportStatus> {
+    return this.run(signal, async ctx => ops.reportStatus(ctx, runId))
+  }
+
   private async run<T>(signal: AbortSignal, action: (ctx: ops.OperationContext) => Promise<T>): Promise<T> {
     signal.throwIfAborted()
     try {
@@ -160,6 +183,8 @@ export class KeelService extends TypertRemoteService {
       },
       set: (ref, value) => credentials.set(credentialRef(ref), value),
       unset: ref => credentials.unset(credentialRef(ref)),
+      jobs: this.jobs,
+      wecomClients: this.wecomClients,
     }
   }
 }

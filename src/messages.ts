@@ -11,6 +11,14 @@ export const KEEL_MESSAGES = {
   'keel/gitlab-tls': 'GitLab 证书不受信任。若这是自建证书，请在设置里打开允许自签证书。',
   'keel/session-unavailable': '无法把议题送到会话',
   'keel/wecom-not-configured': '尚未配置企业微信',
+  'keel/wecom-unavailable': '无法连接企业微信',
+  'keel/wecom-unauthorized': '企业微信 Secret 无效或应用未授权',
+  'keel/wecom-forbidden': '企业微信应用缺少文档或微盘权限',
+  'keel/wecom-ambiguous-doc': '目录里有多份同名文档',
+  'keel/wecom-docid-unreadable': '无法读取该项目的企业微信文档',
+  'keel/wecom-doc-index': '文档内容下标对不上，未做修改',
+  'keel/wecom-rejected': '企业微信拒绝了这次写入',
+  'keel/report-stale': '预览已过期，请重新预览',
 } as const
 
 export const REDIRECT_MESSAGE = '地址被重定向，请把 baseUrl 写成最终源站'

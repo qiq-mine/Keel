@@ -14,7 +14,15 @@ import {
   type SaveField,
 } from '../board/model.js'
 import { createDebounce } from '../board/shortcuts.js'
-import { BoardView, KeelIcon, statusOf } from './view.js'
+import {
+  BoardView,
+  KeelIcon,
+  statusOf,
+  reportButtonState,
+  formatLastReport,
+  type ReportDialogState,
+} from './view.js'
+import type { ReportStatus } from '../report/run.js'
 
 const POLL_MS = 10_000
 
@@ -38,6 +46,8 @@ interface KeelRemote {
   setDueDate(projectId: number, iid: number, dueDate: string, signal?: AbortSignal): Promise<RemoteResult<KeelIssue>>
   setRisk(projectId: number, iid: number, risk: KeelRisk, signal?: AbortSignal): Promise<RemoteResult<KeelIssue>>
   setState(projectId: number, iid: number, state: 'opened' | 'closed', signal?: AbortSignal): Promise<RemoteResult<KeelIssue>>
+  reportStart(mode: 'preview' | 'write', asOf: string, signal?: AbortSignal): Promise<RemoteResult<{ runId: string }>>
+  reportStatus(runId: string, signal?: AbortSignal): Promise<RemoteResult<ReportStatus>>
 }
 
 interface SettingsRemote {
@@ -147,6 +157,14 @@ export function apply(ctx: ClientHost): void {
       if (field === 'risk') return unwrap(await ctx.remote.keel.setRisk(issue.projectId, issue.iid, attempted as KeelRisk))
       return unwrap(await ctx.remote.keel.setState(issue.projectId, issue.iid, attempted as 'opened' | 'closed'))
     },
+    async reportStart(mode: 'preview' | 'write', asOf: string) {
+      await ready
+      return unwrap(await ctx.remote.keel.reportStart(mode, asOf))
+    },
+    async reportStatus(runId: string) {
+      await ready
+      return unwrap(await ctx.remote.keel.reportStatus(runId))
+    },
   }
   ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
     name: 'sidebar.panellist',
@@ -169,7 +187,7 @@ function unwrap<T>(result: RemoteResult<T>): T {
   return result.value
 }
 
-function BoardApp({ remote }: { remote: {
+export function BoardApp({ remote }: { remote: {
   listIssues(query: KeelListQuery): Promise<KeelListPage>
   connection(): Promise<KeelConnection>
   columnModes(projectId: number): Promise<{ modes: { projectId: number, columnMode: 'status' | 'state' }[], truncated: boolean }>
@@ -180,6 +198,8 @@ function BoardApp({ remote }: { remote: {
   saveConfig(input: { baseUrl: string, groupPath: string, token: string, allowSelfSigned: boolean, wecomCorpId: string, wecomSpaceId: string, wecomFatherId: string, wecomSecret: string }, tokenConfigured: boolean): Promise<KeelConnection>
   clearToken(): Promise<{ configured: false }>
   write(field: SaveField, issue: KeelIssue, attempted: string): Promise<KeelIssue>
+  reportStart(mode: 'preview' | 'write', asOf: string): Promise<{ runId: string }>
+  reportStatus(runId: string): Promise<ReportStatus>
 } }) {
   const [filter, setFilter] = useState<FilterState>(DEFAULT_FILTER)
   const [connection, setConnection] = useState<KeelConnection | null>(null)
@@ -212,6 +232,7 @@ function BoardApp({ remote }: { remote: {
   const [closedHasMore, setClosedHasMore] = useState(false)
   const [overduePartial, setOverduePartial] = useState(false)
   const [closedPages, setClosedPages] = useState(1)
+  const [report, setReport] = useState<ReportDialogState>({ kind: 'closed' })
   const ticketRef = useRef(0)
   const cards = useRef({ opened, closed })
   const busy = useRef(false)
@@ -221,9 +242,114 @@ function BoardApp({ remote }: { remote: {
     return () => clearTimeout(handle)
   }))
   const pagesRef = useRef(closedPages)
+  const reportPoll = useRef<{ timer?: ReturnType<typeof setInterval>, cancelled: boolean }>({ cancelled: false })
   cards.current = { opened, closed }
   filterRef.current = filter
   pagesRef.current = closedPages
+
+  function stopReportPoll() {
+    reportPoll.current.cancelled = true
+    if (reportPoll.current.timer !== undefined) {
+      clearInterval(reportPoll.current.timer)
+      reportPoll.current.timer = undefined
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      stopReportPoll()
+    }
+  }, [])
+
+  async function handleReport() {
+    stopReportPoll()
+    const pollState: { timer?: ReturnType<typeof setInterval>, cancelled: boolean } = { cancelled: false }
+    reportPoll.current = pollState
+    setReport({ kind: 'loading', progress: { done: 0, total: 0 } })
+    try {
+      const { runId } = await remote.reportStart('preview', '')
+      if (pollState.cancelled) return
+      pollState.timer = setInterval(async () => {
+        if (pollState.cancelled) return
+        try {
+          const status = await remote.reportStatus(runId)
+          if (pollState.cancelled) return
+          if (status.state === 'queued' || status.state === 'running') {
+            setReport({ kind: 'loading', progress: status.progress })
+          } else if (status.state === 'done') {
+            stopReportPoll()
+            if (status.preview) {
+              setReport({ kind: 'preview', preview: status.preview })
+            } else {
+              setReport({ kind: 'error', message: status.message ?? '周报生成失败' })
+            }
+          } else if (status.state === 'failed') {
+            stopReportPoll()
+            setReport({ kind: 'error', message: status.message ?? '周报生成失败' })
+          }
+        } catch (error) {
+          if (pollState.cancelled) return
+          stopReportPoll()
+          setReport({ kind: 'error', message: messageOf(error) })
+        }
+      }, 1000)
+    } catch (error) {
+      if (pollState.cancelled) return
+      setReport({ kind: 'error', message: messageOf(error) })
+    }
+  }
+
+  async function handleReportWrite() {
+    if (report.kind !== 'preview') return
+    const preview = report.preview
+    stopReportPoll()
+    const pollState: { timer?: ReturnType<typeof setInterval>, cancelled: boolean } = { cancelled: false }
+    reportPoll.current = pollState
+    setReport({ kind: 'writing', preview, progress: { done: 0, total: preview.projects.length } })
+    try {
+      const { runId } = await remote.reportStart('write', preview.asOf)
+      if (pollState.cancelled) return
+      pollState.timer = setInterval(async () => {
+        if (pollState.cancelled) return
+        try {
+          const status = await remote.reportStatus(runId)
+          if (pollState.cancelled) return
+          if (status.state === 'queued' || status.state === 'running') {
+            setReport({ kind: 'writing', preview, progress: status.progress })
+          } else if (status.state === 'done') {
+            stopReportPoll()
+            if (status.result) {
+              setReport({ kind: 'result', preview, result: status.result })
+              try {
+                const updatedConnection = await remote.connection()
+                setConnection(updatedConnection)
+              } catch {
+                // Ignore connection refresh failure
+              }
+            } else {
+              setReport({ kind: 'error', message: status.message ?? '周报写入失败' })
+            }
+          } else if (status.state === 'failed') {
+            stopReportPoll()
+            setReport({ kind: 'error', message: status.message ?? '周报写入失败' })
+          }
+        } catch (error) {
+          if (pollState.cancelled) return
+          stopReportPoll()
+          setReport({ kind: 'error', message: messageOf(error) })
+        }
+      }, 1000)
+    } catch (error) {
+      if (pollState.cancelled) return
+      setReport({ kind: 'error', message: messageOf(error) })
+    }
+  }
+
+  function handleReportClose() {
+    if (report.kind === 'writing') return
+    stopReportPoll()
+    setReport({ kind: 'closed' })
+  }
 
   async function reload(nextFilter: FilterState, pages: number, fromTimer = false) {
     if (fromTimer && busy.current) return
@@ -421,6 +547,12 @@ function BoardApp({ remote }: { remote: {
           setConnection(current => current === null ? current : { ...current, configured: false, tokenConfigured: false, tokenMasked: null })
         })()
       }}
+      reportButton={reportButtonState(connection)}
+      lastReportText={formatLastReport(connection?.lastReport ?? null)}
+      report={report}
+      onReport={() => { void handleReport() }}
+      onReportWrite={() => { void handleReportWrite() }}
+      onReportClose={handleReportClose}
     />
   )
 }

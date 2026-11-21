@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useEffect, useRef, type ReactNode, type KeyboardEvent } from 'react'
 import type { KeelIssue, KeelLabel, KeelMember, KeelProject, KeelRisk } from '../model.js'
 import { issueKey } from '../model.js'
 import { RISK_LABELS } from '../risk.js'
@@ -13,6 +13,42 @@ import { renderIssueMarkdown } from '../board/markdown.js'
 import { assigneeInitials, formatShanghai } from '../board/people.js'
 import { droppedIssue, type CardState, type FilterState } from '../board/model.js'
 import type { KeelNote, KeelSummary } from '../model.js'
+import type { ReportPreview, ReportResult } from '../report/run.js'
+
+export function reportButtonState(c: { configured: boolean, gitlabHealth: 'unconfigured' | 'ok' | 'error', wecomConfigured: boolean } | null): { disabled: boolean, title: string } {
+  if (c === null || !c.configured || c.gitlabHealth !== 'ok') {
+    return { disabled: true, title: '尚未配置 GitLab 连接' }
+  }
+  if (!c.wecomConfigured) {
+    return { disabled: true, title: '尚未配置企业微信' }
+  }
+  return { disabled: false, title: '预览并写入本周周报' }
+}
+
+export function formatLastReport(r: { at: string, written: number, skipped: number, failed: number } | null): string | null {
+  if (r === null) return null
+  const date = new Date(r.at)
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  })
+  const parts = formatter.formatToParts(date)
+  const find = (type: string) => parts.find(p => p.type === type)?.value ?? ''
+  const formatted = `${find('month')}-${find('day')} ${find('hour')}:${find('minute')}`
+  return `上次周报：${formatted} 写入 ${r.written} 跳过 ${r.skipped} 失败 ${r.failed}`
+}
+
+export type ReportDialogState =
+  | { kind: 'closed' }
+  | { kind: 'loading', progress: { done: number, total: number } }
+  | { kind: 'preview', preview: ReportPreview }
+  | { kind: 'writing', preview: ReportPreview, progress: { done: number, total: number } }
+  | { kind: 'result', preview: ReportPreview | null, result: ReportResult }
+  | { kind: 'error', message: string }
 
 export interface BoardViewProps {
   configured: boolean
@@ -53,6 +89,9 @@ export interface BoardViewProps {
   closedTruncated: boolean
   closedHasMore: boolean
   overduePartial: boolean
+  reportButton?: { disabled: boolean, title: string }
+  lastReportText?: string | null
+  report?: ReportDialogState
   onRefresh(): void
   onFilter(filter: FilterState): void
   onDueDate(issue: KeelIssue, value: string): void
@@ -71,6 +110,9 @@ export interface BoardViewProps {
   onCloseDrawer(): void
   onHelp(): void
   onStatus(issue: KeelIssue, status: 'todo' | 'doing' | 'blocked' | 'done' | 'none'): void
+  onReport?(): void
+  onReportWrite?(): void
+  onReportClose?(): void
 }
 
 const RISK_NAMES = new Set<string>(Object.values(RISK_LABELS))
@@ -82,7 +124,23 @@ const RISK_OPTIONS: { value: KeelRisk, label: string }[] = [
   { value: 'high', label: '高' },
 ]
 
-export function BoardView(props: BoardViewProps) {
+export function BoardView(rawProps: BoardViewProps) {
+  const props: BoardViewProps & {
+    reportButton: { disabled: boolean, title: string }
+    lastReportText: string | null
+    report: ReportDialogState
+    onReport(): void
+    onReportWrite(): void
+    onReportClose(): void
+  } = {
+    ...rawProps,
+    reportButton: rawProps.reportButton ?? { disabled: true, title: '尚未配置 GitLab 连接' },
+    lastReportText: rawProps.lastReportText ?? null,
+    report: rawProps.report ?? { kind: 'closed' },
+    onReport: rawProps.onReport ?? (() => {}),
+    onReportWrite: rawProps.onReportWrite ?? (() => {}),
+    onReportClose: rawProps.onReportClose ?? (() => {}),
+  }
   return (
     <section className="keel-board" aria-label="项目看板">
       <style>{STYLES}</style>
@@ -95,7 +153,15 @@ export function BoardView(props: BoardViewProps) {
         <button type="button" onClick={() => props.onView('board')} aria-pressed={props.view === 'board'}>看板</button>
         <button type="button" onClick={() => props.onView('list')} aria-pressed={props.view === 'list'}>列表</button>
         <button type="button" onClick={props.onCreate}>新建议题</button>
-        <button type="button" disabled title="企业微信周报将在下一版提供">立即生成本周周报</button>
+        <button
+          type="button"
+          disabled={props.reportButton.disabled || props.report.kind === 'loading' || props.report.kind === 'writing'}
+          title={props.reportButton.title}
+          onClick={props.onReport}
+        >
+          立即生成本周周报
+        </button>
+        {props.lastReportText !== null ? <span className="keel-last-report">{props.lastReportText}</span> : null}
         <button type="button" onClick={props.onHelp}>快捷键</button>
       </header>
       {props.helpOpen ? <ShortcutHelp /> : null}
@@ -128,6 +194,7 @@ export function BoardView(props: BoardViewProps) {
           )
       ) : null}
       {props.drawer.kind !== 'none' ? <Drawer {...props} /> : null}
+      {props.report.kind !== 'closed' ? <ReportDialog {...props} /> : null}
     </section>
   )
 }
@@ -366,6 +433,157 @@ function Drawer(props: BoardViewProps) {
   )
 }
 
+function countsDiffer(
+  a: NonNullable<ReportResult['projects'][number]['counts']>,
+  b: NonNullable<ReportResult['projects'][number]['counts']>
+): boolean {
+  const norm = (c: typeof a) => JSON.stringify({
+    created: c.created,
+    closed: c.closed,
+    overdue: c.overdue,
+    highRiskEvents: c.highRiskEvents,
+    doing: c.doing,
+    blocked: c.blocked,
+    highRiskNow: c.highRiskNow,
+  })
+  return norm(a) !== norm(b)
+}
+
+function ReportDialog(props: {
+  report: ReportDialogState
+  onReportWrite(): void
+  onReportClose(): void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    ref.current?.focus()
+  }, [])
+
+  const { report } = props
+  if (report.kind === 'closed') return null
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape' && report.kind !== 'writing') {
+      props.onReportClose()
+    }
+  }
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="本周周报预览"
+      className="keel-report"
+      tabIndex={-1}
+      ref={ref}
+      onKeyDown={handleKeyDown}
+    >
+      {report.kind === 'loading' ? (
+        <>
+          <p>正在生成预览…</p>
+          <p>已完成 {report.progress.done} / {report.progress.total} 个仓库</p>
+        </>
+      ) : null}
+      {(report.kind === 'preview' || report.kind === 'writing') ? (
+        <>
+          <h2>{report.preview.weekTitle}</h2>
+          <p>窗口：{report.preview.windowStart} 至 {report.preview.windowEnd}</p>
+          <p>生成于：{report.preview.generatedAt}</p>
+          {report.preview.monthlyDue ? <p>本次同时写入 {report.preview.monthlyTitle}</p> : null}
+          {report.preview.projects.length === 0 && report.preview.failed.length === 0 ? (
+            <p>没有可生成的仓库</p>
+          ) : (
+            <>
+              {report.preview.projects.map(p => (
+                <div key={p.projectId} className="keel-report-project">
+                  <h3>{p.projectPath}</h3>
+                  <pre className="keel-report-text">{p.text}</pre>
+                  {p.truncated ? <p>部分议题超出上限，已截断</p> : null}
+                </div>
+              ))}
+              {report.preview.failed.map(f => (
+                <p key={f.projectId} className="keel-error">{f.projectPath}：{f.message}</p>
+              ))}
+            </>
+          )}
+          {report.kind === 'writing' ? (
+            <p>已完成 {report.progress.done} / {report.progress.total} 个仓库</p>
+          ) : null}
+          <div className="keel-report-actions">
+            <button
+              type="button"
+              onClick={props.onReportWrite}
+              disabled={report.kind === 'writing'}
+            >
+              写入企业微信
+            </button>
+            <button
+              type="button"
+              onClick={props.onReportClose}
+              disabled={report.kind === 'writing'}
+            >
+              关闭
+            </button>
+          </div>
+        </>
+      ) : null}
+      {report.kind === 'result' ? (
+        <>
+          <h2>{report.result.weekTitle}</h2>
+          {report.result.message !== null ? (
+            <p className="keel-error" role="alert">{report.result.message}</p>
+          ) : null}
+          {report.result.projects.map(p => {
+            const weeklyLabel = p.weekly === 'written'
+              ? '已写入'
+              : p.weekly === 'skipped'
+                ? '已跳过（内容相同）'
+                : `失败：${p.message ?? '未知错误'}`
+            const monthlyLabel = p.monthly === 'written'
+              ? '月报已写入'
+              : p.monthly === 'skipped'
+                ? '月报已跳过（内容相同）'
+                : p.monthly === 'failed'
+                  ? `月报失败：${p.message ?? '未知错误'}`
+                  : null
+            let countsChanged = false
+            if (report.preview !== null && p.counts !== null) {
+              const prev = report.preview.projects.find(item => item.projectId === p.projectId)
+              if (prev && countsDiffer(prev.counts, p.counts)) {
+                countsChanged = true
+              }
+            }
+            return (
+              <div key={p.projectId} className="keel-report-result-project">
+                <h3>{p.projectPath}</h3>
+                <p>
+                  <span>{weeklyLabel}</span>
+                  {monthlyLabel !== null ? <span>{monthlyLabel}</span> : null}
+                  {p.docUrl !== null ? (
+                    <a href={p.docUrl} target="_blank" rel="noreferrer">打开文档</a>
+                  ) : null}
+                  {countsChanged ? <span>数据在预览后有变化，已按最新数据写入</span> : null}
+                </p>
+              </div>
+            )
+          })}
+          <div className="keel-report-actions">
+            <button type="button" onClick={props.onReportClose}>关闭</button>
+          </div>
+        </>
+      ) : null}
+      {report.kind === 'error' ? (
+        <>
+          <p className="keel-error" role="alert">{report.message}</p>
+          <div className="keel-report-actions">
+            <button type="button" onClick={props.onReportClose}>关闭</button>
+          </div>
+        </>
+      ) : null}
+    </div>
+  )
+}
+
 function dropCard(props: BoardViewProps, target: 'opened' | 'closed', key: string) {
   const issue = droppedIssue(props.opened, props.closed, key, target)
   if (issue === null) return
@@ -527,6 +745,11 @@ const STYLES = `
 .keel-drawer { position: absolute; right: 0; top: 0; width: 420px; max-width: 100%; background: #fff; border-left: 1px solid #d0d7de; padding: 16px; }
 .keel-avatar { display: inline-flex; width: 24px; height: 24px; align-items: center; justify-content: center; border-radius: 50%; background: #eaeef2; margin-right: 4px; }
 .keel-board { position: relative; }
+.keel-report { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 20px; max-width: 800px; max-height: 80vh; overflow-y: auto; z-index: 100; box-shadow: 0 8px 24px rgba(0,0,0,0.12); }
+.keel-report-text { white-space: pre-wrap; font-family: monospace; }
+.keel-last-report { font-size: 13px; color: #57606a; margin-left: 8px; }
+.keel-report-actions { display: flex; gap: 8px; margin-top: 16px; }
+.keel-report-result-project p { display: flex; gap: 8px; align-items: center; }
 @media (max-width: 767px) {
   .keel-columns, .keel-filters, .keel-connect { display: flex; flex-direction: column; }
   .keel-filters label, .keel-connect label { width: 100%; }

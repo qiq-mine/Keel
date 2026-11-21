@@ -1,7 +1,16 @@
 import type { Config } from './config.js'
 import { assertConfigured, readConnection } from './config.js'
-import { keelError } from './errors.js'
+import { KeelError, keelError } from './errors.js'
 import { GitLabApi } from './gitlab/api.js'
+import { WecomClients, WecomHttp } from './wecom/http.js'
+import {
+  checkAsOf,
+  previewReport,
+  type ReportJobs,
+  type ReportStatus,
+  type RunDeps,
+  writeReport,
+} from './report/run.js'
 import type { AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { MessageId, UserMessage } from '@deepseek-ai/dsh-llm'
@@ -37,10 +46,12 @@ export interface OperationContext {
   fetch?: typeof fetch
   log?: (line: string) => void
   sleep?: (ms: number) => Promise<void>
+  wecomClients?: WecomClients
   agents?: {
     get(id: SessionId): { followup(message: UserMessage): void } | undefined
     create(options: CreateAgentOptions): Promise<AgentHandle>
   }
+  jobs?: ReportJobs
 }
 
 export async function connection(ctx: OperationContext, signal?: AbortSignal): Promise<KeelConnection> {
@@ -48,6 +59,38 @@ export async function connection(ctx: OperationContext, signal?: AbortSignal): P
   const described = await ctx.describe(settings.tokenRef)
   const wecom = await ctx.describe(settings.wecomSecretRef)
   const wecomConfigured = settings.wecomCorpId !== '' && settings.wecomSpaceId !== '' && settings.wecomFatherId !== '' && wecom.configured
+
+  let wecomHealth: 'unconfigured' | 'ok' | 'error' = 'unconfigured'
+  let wecomHealthDetail: string | null = null
+  try {
+    if (!wecomConfigured) {
+      wecomHealth = 'unconfigured'
+      wecomHealthDetail = null
+    } else {
+      const c = await wecomClient(ctx)
+      if (c === null) {
+        wecomHealth = 'unconfigured'
+        wecomHealthDetail = null
+      } else {
+        try {
+          await c.http.token(signal)
+          wecomHealth = 'ok'
+          wecomHealthDetail = null
+        } catch (error) {
+          wecomHealth = 'error'
+          if (error instanceof KeelError && error.code === 'keel/wecom-unauthorized') {
+            wecomHealthDetail = '企业微信 Secret 无效或应用未授权'
+          } else {
+            wecomHealthDetail = '无法连接企业微信'
+          }
+        }
+      }
+    }
+  } catch {
+    wecomHealth = 'error'
+    wecomHealthDetail = '无法连接企业微信'
+  }
+
   const shell = {
     baseUrl: settings.baseUrl,
     groupPath: settings.groupPath,
@@ -60,9 +103,9 @@ export async function connection(ctx: OperationContext, signal?: AbortSignal): P
     wecomFatherId: settings.wecomFatherId,
     wecomSecretConfigured: wecom.configured,
     wecomSecretMasked: wecom.masked ?? null,
-    wecomHealth: 'unconfigured' as const,
-    wecomHealthDetail: wecomConfigured ? '周报写入将在下一版提供' : null,
-    lastReport: null,
+    wecomHealth,
+    wecomHealthDetail,
+    lastReport: ctx.jobs?.lastReport() ?? null,
   }
   if (settings.baseUrl === '' || settings.groupPath === '' || !described.configured) {
     return { ...shell, configured: false, groupFullPath: null, labelsReady: false, gitlabHealth: 'unconfigured', gitlabHealthDetail: null }
@@ -92,6 +135,84 @@ export async function connection(ctx: OperationContext, signal?: AbortSignal): P
       gitlabHealthDetail: error instanceof Error ? error.message : '无法连接 GitLab',
     }
   }
+}
+
+export async function wecomClient(ctx: OperationContext): Promise<{ http: WecomHttp; target: { spaceid: string; fatherid: string } } | null> {
+  const settings = readConnection(ctx.config)
+  if (settings.wecomCorpId === '' || settings.wecomSpaceId === '' || settings.wecomFatherId === '') {
+    return null
+  }
+  const secret = await ctx.resolve(settings.wecomSecretRef)
+  if (secret === undefined || secret.trim() === '') {
+    return null
+  }
+  const opts = {
+    corpId: settings.wecomCorpId,
+    secret,
+    fetch: ctx.fetch,
+    log: ctx.log,
+    sleep: ctx.sleep,
+  }
+  return {
+    http: ctx.wecomClients ? ctx.wecomClients.get(opts) : new WecomHttp(opts),
+    target: {
+      spaceid: settings.wecomSpaceId,
+      fatherid: settings.wecomFatherId,
+    },
+  }
+}
+
+export function reportDeps(ctx: OperationContext, signal?: AbortSignal): RunDeps {
+  let cachedApi: GitLabApi | undefined
+  let cachedMap: Map<number, string> | undefined
+
+  return {
+    now: () => Date.now(),
+    projects: async () => {
+      const api = await openApi(ctx)
+      const map = await api.projects(signal)
+      const modes = await api.columnModes(undefined, map, signal)
+      cachedApi = api
+      cachedMap = map
+      const modeMap = new Map(modes.modes.map(m => [m.projectId, m.columnMode]))
+      return [...map].map(([projectId, projectPath]) => ({
+        projectId,
+        projectPath,
+        columnMode: modeMap.get(projectId) ?? 'state',
+      }))
+    },
+    source: {
+      reportIssues: (id: number, params: Record<string, string>) => {
+        if (!cachedApi || !cachedMap) throw keelError('keel/not-configured')
+        return cachedApi.reportIssues(id, params, cachedMap, signal)
+      },
+      labelEvents: (id: number, iid: number) => {
+        if (!cachedApi || !cachedMap) throw keelError('keel/not-configured')
+        return cachedApi.labelEvents(id, iid, cachedMap, signal)
+      },
+    },
+    wecom: () => wecomClient(ctx),
+  }
+}
+
+export async function reportStart(ctx: OperationContext, mode: string, asOf: string): Promise<{ runId: string }> {
+  const jobs = ctx.jobs
+  if (!jobs) throw keelError('keel/not-configured')
+  if (mode === 'preview') {
+    const runId = jobs.start(onProgress => previewReport({ ...reportDeps(ctx), onProgress }).then(preview => ({ preview })))
+    return { runId }
+  }
+  if (mode === 'write') {
+    const at = checkAsOf(asOf, Date.now())
+    const runId = jobs.start(onProgress => writeReport({ ...reportDeps(ctx), onProgress }, 'manual', at).then(result => ({ result })))
+    return { runId }
+  }
+  throw keelError('keel/invalid-input')
+}
+
+export function reportStatus(ctx: OperationContext, runId: string): ReportStatus {
+  if (!ctx.jobs) throw keelError('keel/not-found')
+  return ctx.jobs.status(runId)
 }
 
 export async function setToken(ctx: OperationContext, value: string): Promise<{ configured: true }> {

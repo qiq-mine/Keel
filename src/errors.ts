@@ -14,6 +14,14 @@ export const KEEL_CODES = [
   'keel/gitlab-tls',
   'keel/session-unavailable',
   'keel/wecom-not-configured',
+  'keel/wecom-unavailable',
+  'keel/wecom-unauthorized',
+  'keel/wecom-forbidden',
+  'keel/wecom-ambiguous-doc',
+  'keel/wecom-docid-unreadable',
+  'keel/wecom-doc-index',
+  'keel/wecom-rejected',
+  'keel/report-stale',
 ] as const
 
 export type KeelCode = typeof KEEL_CODES[number]
