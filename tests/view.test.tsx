@@ -8,6 +8,7 @@ import {
   reportButtonState,
   formatLastReport,
 } from '../src/client/view.js'
+import { BoardApp } from '../src/client/index.js'
 import { DEFAULT_FILTER } from '../src/board/model.js'
 
 function props(over: Partial<BoardViewProps> = {}): BoardViewProps {
@@ -303,4 +304,60 @@ test('error report dialog shows message with alert role', () => {
     report: { kind: 'error', message: '服务异常，请稍后重试' },
   })))
   assert.match(html, /role="alert"[^>]*>服务异常，请稍后重试/)
+})
+
+test('BoardApp renders with report controls and connection', () => {
+  const fakeRemote = {
+    async listIssues() { return { issues: [], page: 1, perPage: 20, nextPage: null, truncated: false, total: 0 } },
+    async connection() {
+      return {
+        configured: true,
+        baseUrl: 'https://gitlab.example.com',
+        groupPath: 'acme/platform',
+        groupFullPath: 'acme/platform',
+        allowSelfSigned: false,
+        tokenConfigured: true,
+        tokenMasked: 'glpat-***',
+        labelsReady: true,
+        gitlabHealth: 'ok' as const,
+        gitlabHealthDetail: null,
+        wecomConfigured: true,
+        wecomCorpId: 'corp1',
+        wecomSpaceId: 's1',
+        wecomFatherId: 'f1',
+        wecomSecretConfigured: true,
+        wecomSecretMasked: 'sec-***',
+        wecomHealth: 'ok' as const,
+        wecomHealthDetail: null,
+        lastReport: { at: '2026-11-20T02:00:00.000Z', written: 2, skipped: 1, failed: 0 },
+      }
+    },
+    async columnModes() { return { modes: [], truncated: false } },
+    async summary() {
+      return {
+        overdue: { count: 0, complete: true },
+        dueThisWeek: { count: 0, complete: true },
+        highRisk: { count: 0, complete: true },
+        unassessed: { count: 0, complete: true },
+      }
+    },
+    async members() { return [] },
+    async labels() { return [] },
+    async projects() { return [] },
+    async saveConfig() { throw new Error('not implemented') },
+    async clearToken() { throw new Error('not implemented') },
+    async write() { throw new Error('not implemented') },
+    async reportStart() { return { runId: 'run-1' } },
+    async reportStatus() {
+      return {
+        state: 'queued' as const,
+        progress: { done: 0, total: 0 },
+        preview: null,
+        result: null,
+        message: null,
+      }
+    },
+  }
+  const html = renderToStaticMarkup(createElement(BoardApp, { remote: fakeRemote }))
+  assert.match(html, /项目看板/)
 })
